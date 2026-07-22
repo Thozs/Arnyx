@@ -1,0 +1,20 @@
+# arnyx — packages.conf
+# Declare seus pacotes aqui e rode "sync" para instalar
+# ou "rebuild" para sincronização completa (instala + remove).
+#
+# Regras:
+#   • Um pacote por linha
+#   • Linhas com # são comentários
+#   • Seção [pacman] → instalado com pacman
+#   • Seção [yay]    → instalado com yay (AUR)
+# ─────────────────────────────────────────────────────────────
+
+[pacman]
+base
+base-devel
+btop
+fish
+neovim
+
+[yay]
+visual-studio-code-bin

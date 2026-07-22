@@ -1,0 +1,805 @@
+#!/usr/bin/env bash
+# ============================================================
+#  arn — Arnyx: gerenciador declarativo de pacotes para CachyOS
+#  Inspirado no estilo NixOS: declare, sync, pronto.
+# ============================================================
+
+set -uo pipefail
+
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/arnyx/packages.conf"
+LOCK="${XDG_CONFIG_HOME:-$HOME/.config}/arnyx/packages.lock"
+
+# ── Cores ────────────────────────────────────────────────────
+# Aspas ANSI-C ($'...') gravam o byte de ESC de verdade na variável,
+# então funciona tanto em `echo -e` quanto em `cat` (heredoc do usage()).
+RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'; CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; NC=$'\033[0m'
+
+# ── Helpers ──────────────────────────────────────────────────
+info()   { echo -e "${CYAN}::${NC} $*"; }
+ok()     { echo -e "${GREEN}✓${NC} $*"; }
+warn()   { echo -e "${YELLOW}⚠${NC}  $*"; }
+err()    { echo -e "${RED}✗${NC}  $*" >&2; }
+header() { echo -e "\n${BOLD}${BLUE}══ $* ══${NC}"; }
+die()    { err "$*"; exit 1; }
+
+need_conf() {
+    [[ -f "$CONF" ]] || die "Arquivo de configuração não encontrado: $CONF\n   Rode: arn init"
+}
+
+# ── Cache de pacotes instalados ──────────────────────────────
+# Toda invocação do pacman -Q* recarrega o banco local inteiro (é
+# assim que o libalpm funciona por baixo, independe das flags usadas)
+# — caro em HDD. Guardamos o resultado em disco e só refazemos a
+# varredura se o banco local do pacman mudou desde a última vez
+# (instalou/removeu algo), usando o mtime do diretório como gatilho.
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/arnyx"
+CACHE_FILE="$CACHE_DIR/installed.cache"
+PACMAN_LOCAL_DB="/var/lib/pacman/local"
+
+declare -A INSTALLED_SET=()
+declare -A INSTALLED_VER=()
+declare -A EXPLICIT_SET=()
+
+_installed_cache_valid() {
+    [[ -f "$CACHE_FILE" ]] || return 1
+    local db_mtime cache_mtime
+    db_mtime=$(stat -c %Y "$PACMAN_LOCAL_DB" 2>/dev/null) || return 1
+    cache_mtime=$(head -n1 "$CACHE_FILE" 2>/dev/null)
+    [[ -n "$cache_mtime" && "$db_mtime" == "$cache_mtime" ]]
+}
+
+_write_installed_cache() {
+    mkdir -p "$CACHE_DIR" 2>/dev/null
+    local db_mtime; db_mtime=$(stat -c %Y "$PACMAN_LOCAL_DB" 2>/dev/null) || return
+    {
+        echo "$db_mtime"
+        local name exp
+        for name in "${!INSTALLED_SET[@]}"; do
+            exp=0
+            [[ -n "${EXPLICIT_SET[$name]:-}" ]] && exp=1
+            printf '%s\t%s\t%s\n' "$name" "${INSTALLED_VER[$name]}" "$exp"
+        done
+    } > "$CACHE_FILE" 2>/dev/null
+}
+
+_load_installed_set() {
+    INSTALLED_SET=(); INSTALLED_VER=(); EXPLICIT_SET=()
+
+    if _installed_cache_valid; then
+        local name ver exp
+        while IFS=$'\t' read -r name ver exp; do
+            [[ -z "$name" ]] && continue
+            INSTALLED_SET["$name"]=1
+            INSTALLED_VER["$name"]="$ver"
+            [[ "$exp" == 1 ]] && EXPLICIT_SET["$name"]=1
+        done < <(tail -n +2 "$CACHE_FILE")
+        return
+    fi
+
+    local name="" ver="" reason=""
+    while IFS= read -r line; do
+        case "$line" in
+            Name*)              name="${line#*: }" ;;
+            Version*)           ver="${line#*: }"  ;;
+            "Install Reason"*)  reason="${line#*: }" ;;
+            "")
+                if [[ -n "$name" ]]; then
+                    INSTALLED_SET["$name"]=1
+                    INSTALLED_VER["$name"]="$ver"
+                    [[ "$reason" == Explicitly* ]] && EXPLICIT_SET["$name"]=1
+                fi
+                name=""; ver=""; reason=""
+                ;;
+        esac
+    done < <(LC_ALL=C pacman -Qi)
+    # o último pacote da lista não tem linha em branco depois dele
+    if [[ -n "$name" ]]; then
+        INSTALLED_SET["$name"]=1
+        INSTALLED_VER["$name"]="$ver"
+        [[ "$reason" == Explicitly* ]] && EXPLICIT_SET["$name"]=1
+    fi
+
+    _write_installed_cache
+}
+_is_installed() { [[ -n "${INSTALLED_SET[$1]:-}" ]]; }
+
+# ── Parser do .conf ──────────────────────────────────────────
+get_section() {
+    local section="$1"
+    awk -v sec="$section" '
+        /^\[/ { in_sec = ($0 == "["sec"]") ; next }
+        in_sec && /^[^#[:space:]]/ { print $1 }
+    ' "$CONF"
+}
+
+# ── Remover pacote do .conf (sem depender de python3) ────────
+_remove_from_conf() {
+    local pkg="$1" tmp
+    tmp="$(mktemp)"
+    grep -Fxv "$pkg" "$CONF" > "$tmp" && mv "$tmp" "$CONF"
+}
+
+# ── Adicionar pacote ao .conf (sem depender de python3) ──────
+# Insere a linha no fim da seção indicada, criando a seção se faltar.
+# $3 opcional: comentário gravado na linha acima (ex: aviso de nome
+# não verificado). Linhas de comentário são ignoradas por get_section.
+_add_to_conf() {
+    local manager="$1" pkg="$2" comment="${3:-}" tmp
+    tmp="$(mktemp)"
+    awk -v sec="$manager" -v pkg="$pkg" -v cmt="$comment" '
+        function emit() { if (cmt != "") print "# " cmt; print pkg }
+        $0 == "["sec"]" { print; in_sec=1; next }
+        in_sec && /^\[/ { emit(); in_sec=0 }
+        { print }
+        END { if (in_sec) emit() }
+    ' "$CONF" > "$tmp" && mv "$tmp" "$CONF"
+}
+
+# ── Instalar um pacote e limpar do .conf se falhar ───────────
+# Retorna 0 se instalou, 1 se falhou (e removeu do .conf)
+_install_pkg() {
+    local manager="$1" pkg="$2"
+    if [[ "$manager" == "pacman" ]]; then
+        if sudo pacman -S --needed "$pkg"; then
+            return 0
+        fi
+    else
+        if yay -S --needed --cleanmenu=false --diffmenu=false --removemake "$pkg"; then
+            return 0
+        fi
+    fi
+
+    warn "Instalação de '$pkg' falhou. Removendo do .conf..."
+    _remove_from_conf "$pkg"
+    err "'$pkg' não foi encontrado ou houve erro. Nome removido da lista."
+    return 1
+}
+
+# ── Instalar vários pacotes em uma única transação ───────────
+# Muito mais rápido (1 sync do pacman/yay em vez de N) e só pede
+# a senha do sudo uma vez. Se o lote falhar, cai pro modo
+# individual só para identificar e limpar o(s) pacote(s) ruim(ns).
+_install_batch() {
+    local manager="$1"; shift
+    local pkgs=("$@")
+    (( ${#pkgs[@]} )) || return 0
+
+    if [[ "$manager" == "pacman" ]]; then
+        sudo pacman -S --needed "${pkgs[@]}" && return 0
+    else
+        yay -S --needed --cleanmenu=false --diffmenu=false --removemake "${pkgs[@]}" && return 0
+    fi
+
+    warn "Instalação em lote falhou, tentando pacote a pacote pra achar o culpado..."
+    local pkg
+    for pkg in "${pkgs[@]}"; do
+        pacman -Q "$pkg" &>/dev/null || _install_pkg "$manager" "$pkg" || true
+    done
+}
+
+# ── Seção: init ──────────────────────────────────────────────
+cmd_init() {
+    local dir; dir="$(dirname "$CONF")"
+    mkdir -p "$dir"
+
+    if [[ -f "$CONF" ]]; then
+        warn "Configuração já existe em: $CONF"
+        return
+    fi
+
+    cat > "$CONF" << 'EOF'
+# arnyx — packages.conf
+# Declare seus pacotes aqui e rode "sync" para instalar
+# ou "rebuild" para sincronização completa (instala + remove).
+#
+# Regras:
+#   • Um pacote por linha
+#   • Linhas com # são comentários
+#   • Seção [pacman] → instalado com pacman
+#   • Seção [yay]    → instalado com yay (AUR)
+# ─────────────────────────────────────────────────────────────
+
+[pacman]
+
+[yay]
+EOF
+
+    ok "Configuração criada em: $CONF"
+    info "Edite o arquivo e rode 'sync' para aplicar."
+}
+
+# ── Seção: add ───────────────────────────────────────────────
+cmd_add() {
+    local manager="${1:-}"; shift || true
+    [[ "$manager" == "pacman" || "$manager" == "yay" ]] \
+        || die "Uso: add <pacman|yay> <pacote> [pacote2 ...]"
+    (( $# )) || die "Informe ao menos um pacote."
+    need_conf
+
+    for pkg in "$@"; do
+        if get_section "$manager" | grep -qx "$pkg"; then
+            warn "'$pkg' já está na seção [$manager]"
+            continue
+        fi
+
+        _add_to_conf "$manager" "$pkg"
+        ok "Adicionado '$pkg' à seção [$manager] no .conf"
+
+        info "Instalando $pkg..."
+        _install_pkg "$manager" "$pkg" || true
+    done
+
+    _write_lock_from_conf
+}
+
+# ── Resolve o nome real de um pacote (existe de fato no repo/AUR?) ──
+_resolve_pkg_name() {
+    local manager="$1" pkg="$2"
+    if [[ "$manager" == "yay" ]]; then
+        yay -Si "$pkg" &>/dev/null && { echo "$pkg"; return 0; }
+    else
+        pacman -Si "$pkg" &>/dev/null && { echo "$pkg"; return 0; }
+    fi
+    return 1
+}
+
+# ── Busca nomes parecidos quando o exato não existe mais ────────
+_search_similar_names() {
+    local manager="$1" pkg="$2"
+    if [[ "$manager" == "yay" ]]; then
+        yay -Ss "$pkg" 2>/dev/null
+    else
+        pacman -Ss "$pkg" 2>/dev/null
+    fi | awk '/^[a-zA-Z0-9_.+-]+\// {print $1}' | cut -d/ -f2 | head -n 8
+}
+
+# ── Adotar pacote já instalado (sem reinstalar/verificar via rede) ──
+# Usado pelo `manage` ao apertar A. Primeiro tenta confirmar que o
+# nome ainda existe no repo/AUR (pacman -Si/yay -Si); se não existir
+# mais (renomeado, órfão, ou instalado manualmente via pacman -U),
+# busca nomes parecidos e deixa você escolher o certo, ou manter o
+# original marcado como "não verificado", ou pular a adoção.
+_adopt_pkg() {
+    local manager="$1" pkg="$2"
+
+    if get_section "$manager" | grep -qx "$pkg"; then
+        warn "'$pkg' já está na seção [$manager]"
+        return
+    fi
+
+    local resolved
+    if resolved=$(_resolve_pkg_name "$manager" "$pkg"); then
+        _add_to_conf "$manager" "$resolved"
+        ok "Adotado '$resolved' na seção [$manager] (já estava instalado, sem reinstalar)"
+        return
+    fi
+
+    warn "'$pkg' não encontrado com esse nome exato no repo/AUR. Buscando parecidos..."
+    local candidates=()
+    mapfile -t candidates < <(_search_similar_names "$manager" "$pkg")
+
+    local options=() c
+    for c in "${candidates[@]:-}"; do
+        [[ -n "$c" && "$c" != "$pkg" ]] && options+=("$c")
+    done
+    options+=("$pkg   [manter nome original, sem verificar]")
+    options+=("[pular — não adotar]")
+
+    local chosen
+    chosen=$(printf '%s\n' "${options[@]}" | fzf --header "Nome real pra '$pkg'? (repo/AUR pode ter renomeado)")
+    [[ -z "$chosen" || "$chosen" == "[pular"* ]] && { warn "Adoção de '$pkg' pulada."; return; }
+
+    local final_name="${chosen%% *}"
+
+    if [[ "$final_name" == "$pkg" ]]; then
+        _add_to_conf "$manager" "$pkg" "não verificado no repo/AUR ao adotar"
+        ok "Adotado '$pkg' na seção [$manager] (marcado como não verificado)"
+    else
+        _add_to_conf "$manager" "$final_name"
+        ok "Adotado como '$final_name' na seção [$manager]"
+        warn "O pacote instalado no sistema ainda se chama '$pkg'. Rode 'pks' pra instalar '$final_name', e confira se são a mesma coisa antes de remover '$pkg' manualmente."
+    fi
+}
+
+# ── Seção: install ───────────────────────────────────────────
+# Não precisa saber se o pacote é do repo oficial ou do AUR —
+# o comando checa nos dois e adiciona no lugar certo sozinho.
+cmd_install() {
+    (( $# )) || die "Uso: install <pacote> [pacote2 ...]"
+    need_conf
+
+    for pkg in "$@"; do
+        if get_section "pacman" | grep -qx "$pkg" || get_section "yay" | grep -qx "$pkg"; then
+            warn "'$pkg' já está no .conf"
+            continue
+        fi
+
+        if pacman -Si "$pkg" &>/dev/null; then
+            info "'$pkg' encontrado no repo oficial → pacman"
+            cmd_add pacman "$pkg"
+        elif yay -Si "$pkg" &>/dev/null; then
+            info "'$pkg' encontrado no AUR → yay"
+            cmd_add yay "$pkg"
+        else
+            err "'$pkg' não encontrado nem no repo oficial nem no AUR."
+        fi
+    done
+}
+
+# ── Seção: manage ────────────────────────────────────────────
+# Menu interativo (fzf) que junta duas ações num só lugar:
+#   TAB/espaço/enter → marca vários pacotes
+#   D (maiúsculo)    → remove do .conf os marcados que já são gerenciados
+#   A (maiúsculo)    → adota no .conf os marcados que estão soltos (manuais)
+# Maiúsculo de propósito: letra minúscula digitada faria parte do
+# filtro de busca do fzf (ex: digitar "docker" não pode disparar ação).
+cmd_manage() {
+    need_conf
+    command -v fzf >/dev/null 2>&1 || die "fzf não encontrado. Instale com: arn install fzf"
+
+    local show_all=0
+    [[ "${1:-}" == "--all" || "${1:-}" == "-a" ]] && show_all=1
+
+    _load_installed_set
+
+    local pac_declared=() yay_declared=()
+    mapfile -t pac_declared < <(get_section "pacman") || true
+    mapfile -t yay_declared < <(get_section "yay")    || true
+
+    declare -A declared_set=() declared_manager=()
+    for p in "${pac_declared[@]:-}"; do
+        [[ -n "$p" ]] && { declared_set["$p"]=1; declared_manager["$p"]="pacman"; }
+    done
+    for p in "${yay_declared[@]:-}"; do
+        [[ -n "$p" ]] && { declared_set["$p"]=1; declared_manager["$p"]="yay"; }
+    done
+
+    # Descobre quais explícitos são "estrangeiros" (AUR) pra saber em
+    # que seção cai ao adotar um pacote manual.
+    declare -A foreign_set=()
+    while read -r pkg; do
+        [[ -n "$pkg" ]] && foreign_set["$pkg"]=1
+    done < <(LC_ALL=C pacman -Qmq 2>/dev/null)
+
+    # Por padrão só mostra o que precisa de decisão: pendente (declarado
+    # mas não instalado) e manual (instalado mas não declarado). O que
+    # já está redondo (gerenciado + instalado) fica escondido, a menos
+    # que --all seja passado.
+    local lines=()
+    local pkg
+    for pkg in "${!declared_set[@]}"; do
+        if _is_installed "$pkg"; then
+            (( show_all )) && lines+=("$(printf '%-11s %-7s %s' 'gerenciado' "${declared_manager[$pkg]}" "$pkg")")
+        else
+            lines+=("$(printf '%-11s %-7s %s' 'pendente' "${declared_manager[$pkg]}" "$pkg")")
+        fi
+    done
+    for pkg in "${!EXPLICIT_SET[@]}"; do
+        [[ -n "${declared_set[$pkg]:-}" ]] && continue
+        local src="pacman"
+        [[ -n "${foreign_set[$pkg]:-}" ]] && src="yay"
+        lines+=("$(printf '%-11s %-7s %s' 'manual' "$src" "$pkg")")
+    done
+
+    if (( ${#lines[@]} == 0 )); then
+        if (( show_all )); then
+            info "Nada pra gerenciar."
+        else
+            ok "Tudo em ordem — nenhum pacote pendente ou manual."
+            info "Use 'arn manage --all' pra ver a lista completa."
+        fi
+        return
+    fi
+
+    local raw
+    raw=$(printf '%s\n' "${lines[@]}" | sort -k3 | fzf \
+        --multi \
+        --header 'TAB/espaço/enter: marca vários  •  D: remove do .conf  •  A: adota no .conf  •  ESC: cancela' \
+        --bind 'space:toggle,enter:toggle' \
+        --expect='D,A')
+
+    [[ -z "$raw" ]] && { info "Cancelado."; return; }
+
+    local key; key=$(head -n1 <<< "$raw")
+    local chosen=(); mapfile -t chosen < <(tail -n +2 <<< "$raw")
+    chosen=("${chosen[@]//$'\r'/}")
+
+    (( ${#chosen[@]} )) || { warn "Nenhum pacote marcado."; return; }
+
+    case "$key" in
+        D)
+            local to_remove=()
+            local line
+            for line in "${chosen[@]}"; do
+                [[ -z "$line" ]] && continue
+                if [[ "$line" == manual* ]]; then
+                    warn "Ignorando (não está gerenciado): $(awk '{print $NF}' <<< "$line")"
+                else
+                    to_remove+=("$(awk '{print $NF}' <<< "$line")")
+                fi
+            done
+            (( ${#to_remove[@]} )) && cmd_remove "${to_remove[@]}"
+            ;;
+        A)
+            local line src pkg adopted_any=0
+            for line in "${chosen[@]}"; do
+                [[ -z "$line" ]] && continue
+                if [[ "$line" == manual* ]]; then
+                    src=$(awk '{print $2}' <<< "$line")
+                    pkg=$(awk '{print $NF}' <<< "$line")
+                    _adopt_pkg "$src" "$pkg"
+                    adopted_any=1
+                else
+                    warn "Ignorando (já está gerenciado): $(awk '{print $NF}' <<< "$line")"
+                fi
+            done
+            (( adopted_any )) && _write_lock_from_conf
+            ;;
+        *)
+            info "Nenhuma ação escolhida (use D pra remover ou A pra adotar)."
+            ;;
+    esac
+}
+
+# ── Seção: remove ────────────────────────────────────────────
+cmd_remove() {
+    (( $# )) || die "Uso: remove <pacote> [pacote2 ...]"
+    need_conf
+
+    for pkg in "$@"; do
+        local found_in=""
+        get_section "pacman" | grep -qx "$pkg" && found_in="pacman"
+        get_section "yay"    | grep -qx "$pkg" && found_in="yay"
+
+        if [[ -z "$found_in" ]]; then
+            warn "'$pkg' não está no .conf"
+            if pacman -Q "$pkg" &>/dev/null; then
+                info "Pacote encontrado no sistema. Removendo..."
+                sudo pacman -Rns "$pkg" && ok "Removido: $pkg" || err "Falha ao remover: $pkg"
+            else
+                err "'$pkg' não está instalado nem no .conf."
+            fi
+            continue
+        fi
+
+        _remove_from_conf "$pkg"
+        ok "Removido '$pkg' do .conf [$found_in]"
+
+        if pacman -Q "$pkg" &>/dev/null; then
+            info "Desinstalando $pkg e dependências órfãs..."
+            sudo pacman -Rns "$pkg" && ok "Desinstalado: $pkg" || warn "Falha ao desinstalar. Remova manualmente."
+        else
+            info "'$pkg' já não estava instalado no sistema."
+        fi
+    done
+
+    _write_lock_from_conf
+}
+
+# ── Seção: sync ──────────────────────────────────────────────
+# Instala o que está no .conf e não está instalado.
+# NÃO remove pacotes que saíram do .conf (use rebuild para isso).
+cmd_sync() {
+    need_conf
+    header "Sync — instalando pacotes pendentes"
+    _load_installed_set
+
+    local pac_declared=() yay_declared=()
+    mapfile -t pac_declared < <(get_section "pacman") || true
+    mapfile -t yay_declared < <(get_section "yay")    || true
+
+    local pac_missing=() yay_missing=()
+    for pkg in "${pac_declared[@]:-}"; do
+        [[ -z "$pkg" ]] && continue
+        _is_installed "$pkg" || pac_missing+=("$pkg")
+    done
+    for pkg in "${yay_declared[@]:-}"; do
+        [[ -z "$pkg" ]] && continue
+        _is_installed "$pkg" || yay_missing+=("$pkg")
+    done
+
+    if (( ${#pac_missing[@]} == 0 && ${#yay_missing[@]} == 0 )); then
+        ok "Tudo já está instalado."
+    else
+        if (( ${#pac_missing[@]} )); then
+            info "Instalando via pacman: ${pac_missing[*]}"
+            _install_batch "pacman" "${pac_missing[@]}"
+        fi
+        if (( ${#yay_missing[@]} )); then
+            info "Instalando via yay: ${yay_missing[*]}"
+            _install_batch "yay" "${yay_missing[@]}"
+        fi
+        ok "Sync concluído!"
+    fi
+
+    _write_lock_from_conf
+}
+
+# ── Seção: rebuild ───────────────────────────────────────────
+# Sincronização completa: instala novos + remove o que saiu do .conf.
+# --dry-run/-n: só mostra o que seria feito, não aplica nada.
+cmd_rebuild() {
+    need_conf
+
+    local dry_run=0
+    [[ "${1:-}" == "--dry-run" || "${1:-}" == "-n" ]] && dry_run=1
+
+    header "Rebuild — sincronização completa$( (( dry_run )) && echo ' (dry-run)' )"
+    _load_installed_set
+
+    local pac_declared=() yay_declared=()
+    mapfile -t pac_declared < <(get_section "pacman") || true
+    mapfile -t yay_declared < <(get_section "yay")    || true
+
+    local pac_installed=() yay_installed=()
+    if [[ -f "$LOCK" ]]; then
+        mapfile -t pac_installed < <(awk '/^\[pacman\]/{f=1;next}/^\[/{f=0}f&&/\S/{print $1}' "$LOCK") || true
+        mapfile -t yay_installed < <(awk '/^\[yay\]/{f=1;next}/^\[/{f=0}f&&/\S/{print $1}' "$LOCK")    || true
+    fi
+
+    # ── Calcular o que falta instalar ────────────────────────
+    local pac_missing=() yay_missing=()
+    for pkg in "${pac_declared[@]:-}"; do
+        [[ -z "$pkg" ]] && continue
+        _is_installed "$pkg" || pac_missing+=("$pkg")
+    done
+    for pkg in "${yay_declared[@]:-}"; do
+        [[ -z "$pkg" ]] && continue
+        _is_installed "$pkg" || yay_missing+=("$pkg")
+    done
+
+    # Set dos pacotes declarados, pra checagem O(1) em vez de loop aninhado
+    declare -A declared_set=()
+    for d in "${pac_declared[@]:-}" "${yay_declared[@]:-}"; do
+        [[ -n "$d" ]] && declared_set["$d"]=1
+    done
+
+    # ── Calcular órfãos (saíram do .conf mas ainda instalados) ──
+    local to_remove=()
+    for pkg in "${pac_installed[@]:-}" "${yay_installed[@]:-}"; do
+        [[ -z "$pkg" ]] && continue
+        if [[ -z "${declared_set[$pkg]:-}" ]] && _is_installed "$pkg"; then
+            to_remove+=("$pkg")
+        fi
+    done
+
+    # ── Resumo (mostrado sempre, dry-run ou não) ─────────────
+    echo -e "\n${BOLD}Vai instalar:${NC}"
+    if (( ${#pac_missing[@]} == 0 && ${#yay_missing[@]} == 0 )); then
+        echo "  (nenhum)"
+    else
+        for pkg in "${pac_missing[@]:-}" "${yay_missing[@]:-}"; do
+            [[ -n "$pkg" ]] && echo -e "  ${GREEN}+${NC} $pkg"
+        done
+    fi
+
+    echo -e "\n${BOLD}Vai remover (órfão, saiu do .conf):${NC}"
+    if (( ${#to_remove[@]} == 0 )); then
+        echo "  (nenhum)"
+    else
+        for pkg in "${to_remove[@]}"; do
+            echo -e "  ${RED}−${NC} $pkg"
+        done
+    fi
+    echo
+
+    if (( dry_run )); then
+        info "Dry-run — nada foi alterado. Rode 'arn rebuild' sem --dry-run pra aplicar."
+        return
+    fi
+
+    # ── Instalar novos (em lote) ─────────────────────────────
+    (( ${#pac_missing[@]} )) && _install_batch "pacman" "${pac_missing[@]}"
+    (( ${#yay_missing[@]} )) && _install_batch "yay" "${yay_missing[@]}"
+
+    # Recarrega o cache pra refletir o que acabou de ser instalado
+    _load_installed_set
+
+    # ── Remover órfãos (com confirmação) ─────────────────────
+    local removed_any=0
+    if (( ${#to_remove[@]} )); then
+        local reply
+        read -r -p "$(echo -e "${YELLOW}?${NC} Remover os ${#to_remove[@]} pacote(s) órfão(s) listados acima? [s/N] ")" reply
+        if [[ "$reply" =~ ^[sS]$ ]]; then
+            for pkg in "${to_remove[@]}"; do
+                if _is_installed "$pkg"; then
+                    warn "Removendo (saiu do .conf): $pkg"
+                    sudo pacman -Rns --noconfirm "$pkg" 2>/dev/null && removed_any=1 || true
+                fi
+            done
+        else
+            info "Remoção cancelada. Nada foi removido."
+        fi
+    else
+        info "Nenhum pacote órfão para remover."
+    fi
+
+    _write_lock_from_conf
+    (( removed_any || (${#to_remove[@]} == 0) )) && ok "Rebuild concluído!" || warn "Rebuild concluído (remoção pulada)."
+}
+
+# ── Seção: upgrade ───────────────────────────────────────────
+cmd_upgrade() {
+    local target="${1:-all}"
+
+    case "$target" in
+        pacman)
+            header "Upgrade — pacman (repositórios oficiais)"
+            info "Atualizando pacman..."
+            sudo pacman -Syu
+            ;;
+        yay|aur)
+            header "Upgrade — AUR (yay)"
+            info "Atualizando AUR (yay)..."
+            yay -Syu --aur
+            ;;
+        all)
+            header "Upgrade — atualizando todos os pacotes"
+            info "Atualizando pacman..."
+            sudo pacman -Syu
+            info "Atualizando AUR (yay)..."
+            yay -Syu --aur
+            ;;
+        *)
+            die "Uso: upgrade [pacman|yay]"
+            ;;
+    esac
+
+    _write_lock_from_conf
+    ok "Upgrade concluído!"
+}
+
+# ── Seção: list ──────────────────────────────────────────────
+cmd_list() {
+    need_conf
+    header "Pacotes declarados em $CONF"
+    _load_installed_set
+
+    echo -e "\n${BOLD}[pacman]${NC}"
+    local pac=()
+    mapfile -t pac < <(get_section "pacman") || true
+    for pkg in "${pac[@]:-}"; do
+        [[ -z "$pkg" ]] && continue
+        if _is_installed "$pkg"; then
+            echo -e "  ${GREEN}✓${NC} $pkg ${CYAN}(${INSTALLED_VER[$pkg]})${NC}"
+        else
+            echo -e "  ${YELLOW}○${NC} $pkg ${YELLOW}(não instalado)${NC}"
+        fi
+    done
+
+    echo -e "\n${BOLD}[yay / AUR]${NC}"
+    local aur=()
+    mapfile -t aur < <(get_section "yay") || true
+    for pkg in "${aur[@]:-}"; do
+        [[ -z "$pkg" ]] && continue
+        if _is_installed "$pkg"; then
+            echo -e "  ${GREEN}✓${NC} $pkg ${CYAN}(${INSTALLED_VER[$pkg]})${NC}"
+        else
+            echo -e "  ${YELLOW}○${NC} $pkg ${YELLOW}(não instalado)${NC}"
+        fi
+    done
+    echo
+}
+
+# ── Seção: diff ──────────────────────────────────────────────
+cmd_diff() {
+    need_conf
+    header "Diff — declarado vs instalado"
+    _load_installed_set
+
+    local all_declared=()
+    mapfile -t all_declared < <({ get_section "pacman"; get_section "yay"; }) || true
+
+    declare -A declared_set=()
+    for d in "${all_declared[@]:-}"; do
+        [[ -n "$d" ]] && declared_set["$d"]=1
+    done
+
+    echo -e "\n${BOLD}No .conf mas NÃO instalado:${NC}"
+    local missing=0
+    for pkg in "${all_declared[@]:-}"; do
+        [[ -z "$pkg" ]] && continue
+        _is_installed "$pkg" || { echo -e "  ${YELLOW}○${NC} $pkg"; missing=1; }
+    done
+    (( missing )) || echo "  (nenhum)"
+
+    if [[ -f "$LOCK" ]]; then
+        echo -e "\n${BOLD}No lock mas removidos do .conf (serão removidos no rebuild):${NC}"
+        local lock_pkgs=()
+        mapfile -t lock_pkgs < <(awk '/^\[/{next}/\S/{print $1}' "$LOCK") || true
+        local orphan=0
+        for pkg in "${lock_pkgs[@]:-}"; do
+            [[ -z "$pkg" ]] && continue
+            [[ -n "${declared_set[$pkg]:-}" ]] || { echo -e "  ${RED}−${NC} $pkg"; orphan=1; }
+        done
+        (( orphan )) || echo "  (nenhum)"
+    fi
+
+    echo -e "\n${BOLD}Instalado manualmente (não está no .conf):${NC}"
+    local extra=0
+    while read -r pkg; do
+        [[ -z "$pkg" ]] && continue
+        [[ -n "${declared_set[$pkg]:-}" ]] || { echo -e "  ${CYAN}+${NC} $pkg"; extra=1; }
+    done < <(printf '%s\n' "${!EXPLICIT_SET[@]}" | sort)
+    (( extra )) || echo "  (nenhum)"
+    echo
+}
+
+# ── Seção: edit ──────────────────────────────────────────────
+cmd_edit() {
+    need_conf
+    "${EDITOR:-nano}" "$CONF"
+    info "Rode 'sync' para instalar novos ou 'rebuild' para sincronização completa."
+}
+
+# ── Lock ─────────────────────────────────────────────────────
+_write_lock_from_conf() {
+    local pac=(); mapfile -t pac < <(get_section "pacman") || true
+    local aur=(); mapfile -t aur < <(get_section "yay")    || true
+    {
+        echo "[pacman]"
+        printf '%s\n' "${pac[@]:-}"
+        echo ""
+        echo "[yay]"
+        printf '%s\n' "${aur[@]:-}"
+    } > "$LOCK"
+}
+
+# ── Ajuda ────────────────────────────────────────────────────
+usage() {
+cat << EOF
+${BOLD}arn${NC} — Arnyx, gerenciador declarativo de pacotes para CachyOS
+
+${BOLD}COMANDOS${NC}
+  init                    Cria o arquivo packages.conf inicial
+  install <pkg>           Detecta pacman/AUR sozinho, adiciona e instala
+  manage                  Menu fzf: só pendentes+manuais (o que precisa de decisão)
+  manage --all            Menu fzf: lista completa, incluindo já 100% ok
+  add <pacman|yay> <pkg>  Adiciona ao .conf e instala numa seção específica
+  remove <pkg>            Remove do .conf e desinstala
+  sync                    Instala pendentes do .conf (não remove nada)
+  rebuild                 Sincronização completa: instala + remove órfãos (pede confirmação antes de remover)
+  rebuild --dry-run       Mostra o que seria instalado/removido, sem aplicar nada
+  upgrade                 Atualiza todos os pacotes (pacman + AUR)
+  upgrade pacman          Atualiza somente repositórios oficiais
+  upgrade yay             Atualiza somente pacotes AUR
+  list                    Lista pacotes com versão e status
+  diff                    Mostra divergências entre .conf, lock e sistema
+  edit                    Abre o .conf no \$EDITOR
+
+${BOLD}ALIASES FISH${NC}
+  arni                    → arn install
+  arnrm                   → arn remove
+  arns                    → arn sync
+  arnr                    → arn rebuild
+  arnu                    → arn upgrade
+  arnup                   → arn upgrade pacman
+  arnua                   → arn upgrade yay
+  arnl                    → arn list
+  arnd                    → arn diff
+  arne                    → arn edit
+  arnm                    → arn manage
+  arnma                   → arn manage --all
+
+${BOLD}CONF${NC}: $CONF
+${BOLD}LOCK${NC}: $LOCK
+EOF
+}
+
+# ── Roteador ─────────────────────────────────────────────────
+case "${1:-help}" in
+    init)    cmd_init ;;
+    install) shift; cmd_install "$@" ;;
+    manage)  shift; cmd_manage "$@" ;;
+    add)     shift; cmd_add "$@" ;;
+    remove)  shift; cmd_remove "$@" ;;
+    sync)    cmd_sync ;;
+    rebuild) shift; cmd_rebuild "$@" ;;
+    upgrade) shift; cmd_upgrade "$@" ;;
+    list)    cmd_list ;;
+    diff)    cmd_diff ;;
+    edit)    cmd_edit ;;
+    help|-h|--help) usage ;;
+    *) err "Comando desconhecido: $1"; usage; exit 1 ;;
+esac

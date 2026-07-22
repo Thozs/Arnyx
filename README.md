@@ -1,0 +1,160 @@
+<div align="center">
+
+# Arnyx
+
+**Gerenciador declarativo de pacotes pra Arch/CachyOS, inspirado na filosofia do NixOS.**
+Você declara o que quer num arquivo. O `arn` garante que o sistema reflita isso.
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Shell: Bash](https://img.shields.io/badge/shell-bash-4EAA25?logo=gnubash&logoColor=white)
+![Made for Arch](https://img.shields.io/badge/made%20for-Arch%20%2F%20CachyOS-1793D1?logo=archlinux&logoColor=white)
+![No Python](https://img.shields.io/badge/dependencies-zero%20python-success)
+
+</div>
+
+---
+
+## Sumário
+
+- [O que é](#o-que-é)
+- [Recursos](#recursos)
+- [Instalação](#instalação)
+  - [Instalação rápida (sistema novo/formatado)](#instalação-rápida-sistema-novoformatado)
+- [Backup automático do config pessoal (fish)](#backup-automático-do-config-pessoal-fish)
+- [Aliases](#aliases)
+- [Roadmap](#roadmap)
+- [Por que "Arnyx"?](#por-que-arnyx)
+- [Licença](#licença)
+
+---
+
+## O que é
+
+Projeto pessoal, em desenvolvimento desde 7 de maio de 2026. Construído com ajuda do Claude e testado no dia a dia no meu próprio sistema **Arch/CachyOS**, rodando **fish** + **kitty**.
+
+Arch/CachyOS não tem um jeito nativo de dizer *"esse é o conjunto exato de pacotes que eu quero instalado"* — você vai instalando e desinstalando coisa ao longo do tempo, e o sistema vira um acúmulo de decisões que ninguém lembra mais o porquê.
+
+**Arnyx** resolve isso com um arquivo (`packages.conf`) que descreve o estado desejado do sistema. O comando `arn` compara esse arquivo com o que está de fato instalado e sincroniza os dois — instalando o que falta, e opcionalmente removendo o que sobrou.
+
+Não é NixOS. Não tem reprodutibilidade bit-a-bit, nem rollback atômico, nem *derivations*. É um wrapper honesto sobre `pacman`/`yay` que pega emprestada a *filosofia* — declare, não instale na mão — sem fingir ser mais do que é.
+
+---
+
+## Recursos
+
+| Comando | O que faz |
+|---|---|
+| `arn install <pkg>` | Detecta sozinho se é pacote oficial ou AUR, adiciona ao `.conf` e instala |
+| `arn manage` | Menu interativo (fzf) mostrando só o que precisa de decisão — pendente ou instalado manualmente |
+| `arn sync` | Instala o que falta do `.conf` (não remove nada) |
+| `arn rebuild` | Sincronização completa: instala o que falta + remove o que saiu do `.conf` (pede confirmação `[s/N]` antes de remover) |
+| `arn rebuild --dry-run` | Mostra o que seria instalado/removido, sem aplicar nada |
+| `arn diff` | Compara `.conf`, `.lock` e sistema real |
+| `arn list` | Lista tudo com versão e status |
+| `arn upgrade` | Atualiza pacman + AUR |
+
+Por baixo:
+- **Zero dependência de Python** — parsing do `.conf` inteiro em `awk`/`grep` puro
+- **Cache do banco local do pacman** — evita revarredura cara em HDD a cada comando
+- **Instalação em lote** — uma transação só em vez de uma por pacote
+- **Auto-limpeza** — se um pacote falha ao instalar, some do `.conf` sozinho, sem sujeira
+
+---
+
+## Instalação
+
+```bash
+git clone https://github.com/Thozs/arnyx.git
+cd arnyx
+sudo install -Dm755 bin/arn /usr/local/bin/arn
+arn init
+```
+
+### Instalação rápida (sistema novo/formatado)
+
+Se você acabou de formatar e quer instalar o Arnyx (e opcionalmente restaurar seus próprios pacotes declarados) num comando só:
+
+```bash
+# só instala o arn, com .conf vazio
+bash <(curl -fsSL https://raw.githubusercontent.com/Thozs/Arnyx/main/bootstrap.sh)
+
+# instala o arn E restaura um packages.conf pessoal de outro repositório seu
+bash <(curl -fsSL https://raw.githubusercontent.com/Thozs/Arnyx/main/bootstrap.sh) \
+     https://github.com/SEU_USUARIO/seu-repo-de-config.git
+```
+
+O `bootstrap.sh` instala `git`/`base-devel`, compila o `yay` do zero e instala o `arn`. O segundo argumento é **opcional** e aponta pra outro repositório seu com um `packages.conf` — pode ser público ou privado. Sem esse argumento, instala só a ferramenta, com config vazia.
+
+---
+
+## Backup automático do config pessoal (fish)
+
+Se você seguiu o padrão de repositório de config separado (veja "Instalação rápida" acima), o arquivo [`examples/arnyx-backup.fish`](examples/arnyx-backup.fish) automatiza o envio do seu `packages.conf` real pra esse repositório.
+
+```fish
+# ajuste os dois caminhos no topo do arquivo pro seu caso, depois:
+source /caminho/pra/arnyx-backup.fish
+```
+
+Adicione essa linha no seu `config.fish` pra ter o comando sempre disponível. Depois, sempre que quiser sincronizar seu `packages.conf` real com o repositório de config:
+
+```fish
+arnb
+```
+
+Ele copia o `.conf` atual, verifica se algo mudou desde o último backup (não faz commit vazio à toa), e sobe pro repositório.
+
+---
+
+## Aliases
+
+Os aliases (`arni`, `arns`, `arnr`, etc.) ficam documentados na seção `ALIASES FISH`
+dentro do próprio [`bin/arn`](bin/arn) (função `usage()`) — é a fonte única da verdade.
+
+Arquivos prontos pra copiar, gerados automaticamente a partir dali:
+
+- [Fish](aliases/fish/aliases.fish)
+- [Bash / Zsh](aliases/sh/aliases.sh)
+
+<details>
+<summary>Contribuindo / editando os aliases (não necessário só pra usar o Arnyx)</summary>
+
+Um hook de commit (`.githooks/pre-commit`) regenera esses arquivos sozinho sempre que
+`bin/arn` muda — não precisa rodar nada na mão. Isso só importa se você clonou o
+repositório completo pra mexer no código-fonte; quem só instala e usa o `arn` nunca
+precisa disso.
+
+Pra ativar, uma vez por clone:
+
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit tools/build-aliases.sh
+```
+
+Depois disso, editar um alias é só mexer na seção `ALIASES FISH` do `bin/arn` e
+commitar normalmente — `tools/build-aliases.sh` roda automático e inclui os arquivos
+atualizados no mesmo commit.
+
+</details>
+
+---
+
+## Roadmap
+
+Ideias exploradas mas ainda não implementadas — na fila pra quando der:
+
+- [ ] **Rollback de generations** — histórico navegável de `.conf`/`.lock`, tipo `arn rollback <N>`
+- [ ] **Snapshot via Btrfs** — ponto de restauração real do sistema antes de operações arriscadas
+- [ ] **Camada de config declarativa** — versionar dotfiles (Hyprland, shell, etc.), não só pacotes
+
+---
+
+## Por que "Arnyx"?
+
+Ar(ch) + Nyx (mitologia grega, a deusa da noite — também o som de "Nix"). Sem relação com o projeto `nixy` (config de Hyprland/Caelestia) nem com o pacote `nyx` do repositório oficial (monitor de status do Tor) — nomes parecidos, projetos completamente diferentes.
+
+---
+
+## Licença
+
+[MIT](LICENSE)

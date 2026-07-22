@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — se bin/arn está no commit, regenera aliases/
+# automaticamente (via tools/build-aliases.sh) e inclui no mesmo commit.
+#
+# Setup (uma vez só, por clone):
+#   git config core.hooksPath .githooks
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Só faz algo se bin/arn estiver staged neste commit
+if ! git diff --cached --name-only | grep -qx "bin/arn"; then
+    exit 0
+fi
+
+echo ":: bin/arn mudou — regenerando aliases/ a partir dele..."
+
+if ! ./tools/build-aliases.sh; then
+    echo "✗ build-aliases.sh falhou — commit abortado." >&2
+    exit 1
+fi
+
+git add aliases/
+echo "✓ aliases/ atualizado e incluído neste commit."
