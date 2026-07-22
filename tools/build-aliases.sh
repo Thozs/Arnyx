@@ -11,7 +11,7 @@ ARN_BIN="$REPO_ROOT/bin/arn"
 OUT_DIR="$REPO_ROOT/aliases"
 
 FISH_OUT="$OUT_DIR/fish/aliases.fish"
-SH_OUT="$OUT_DIR/sh/aliases.sh"   # compartilhado entre bash e zsh (sintaxe idêntica)
+SH_OUT="$OUT_DIR/sh/aliases.sh"
 
 if [[ ! -f "$ARN_BIN" ]]; then
     echo "Erro: $ARN_BIN não encontrado." >&2
@@ -55,4 +55,4 @@ done <<< "$pairs"
 
 echo "✓ $count aliases gerados a partir de bin/arn"
 echo "✓ $FISH_OUT"
-echo "✓ $SH_OUT (compartilhado entre bash e zsh)"
+echo "✓ $SH_OUT"
