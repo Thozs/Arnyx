@@ -45,14 +45,17 @@ Arch/CachyOS não tem um jeito nativo de dizer *"esse é o conjunto exato de pac
 | Comando | O que faz |
 |---|---|
 | `arn install <pkg>` | Detecta sozinho se é pacote oficial ou AUR, adiciona ao `.conf` e instala |
+| `arn search <termo>` | Busca no repo oficial + AUR, menu fzf pra instalar direto |
 | `arn manage` | Menu interativo (fzf) mostrando só o que precisa de decisão — pendente ou instalado manualmente |
 | `arn sync` | Instala o que falta do `.conf` (não remove nada) |
 | `arn rebuild` | Sincronização completa: instala o que falta + remove o que saiu do `.conf` (pede confirmação `[s/N]` antes de remover) |
 | `arn rebuild --dry-run` | Mostra o que seria instalado/removido, sem aplicar nada |
 | `arn diff` | Compara `.conf`, `.lock` e sistema real |
+| `arn why` | Por que está instalado: declarado por você ou dependência de quê |
 | `arn list` | Lista tudo com versão e status |
 | `arn upgrade` | Atualiza pacman + AUR |
-| `arn rollback [N]` | Restaura um `.conf` anterior (menu fzf se `N` não for informado) |
+| `arn rollback` | Menu fzf com as gerações salvas (snapshots de sync/rebuild) |
+| `arn rollback [N]` | Restaura o .conf da geração N direto |
 
 Por baixo:
 - **Zero dependência de Python** — parsing do `.conf` inteiro em `awk`/`grep` puro
@@ -174,6 +177,7 @@ atualizados no mesmo commit.
 
 Ideias exploradas mas ainda não implementadas — na fila pra quando der:
 
+- [ ] **Downgrade real de pacotes** — `arn rollback <N> --downgrade` (ou `arn downgrade`): compara o log de versões da geração com o instalado hoje, reinstala via cache local do pacman (`pacman -U`) os que mudaram; avisa sobre `IgnorePkg` pra não ser sobrescrito no próximo upgrade
 - [ ] **Snapshot via Btrfs** — ponto de restauração real do sistema antes de operações arriscadas
 - [ ] **Camada de config declarativa** — versionar dotfiles (Hyprland, shell, etc.), não só pacotes
 

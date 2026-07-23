@@ -1,0 +1,118 @@
+From 1a17a4ca9088bce668facae628ff22b546347c0f Mon Sep 17 00:00:00 2001
+From: Zenkay <zenkay@users.noreply.github.com>
+Date: Thu, 23 Jul 2026 21:31:43 +0000
+Subject: [PATCH 1/2] adiciona arn search (repo oficial + AUR, menu fzf, delega
+ pro install)
+
+---
+ bin/arn | 73 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+
+diff --git a/bin/arn b/bin/arn
+index fdb6423..80b4345 100755
+--- a/bin/arn
++++ b/bin/arn
+@@ -314,6 +314,76 @@ cmd_install() {
+     done
+ }
+ 
++# Emite linhas "manager\tnome\tdescrição" a partir do pacman -Ss.
++# Cada resultado do pacman -Ss ocupa duas linhas (cabeçalho + descrição
++# indentada) — getline consome a segunda direto dentro do mesmo match.
++_search_repo() {
++    LC_ALL=C pacman -Ss "$1" 2>/dev/null | awk '
++        /^[a-zA-Z0-9_.+-]+\// {
++            split($1, a, "/"); name = a[2]
++            d = ""
++            if ((getline d) > 0) sub(/^[ \t]+/, "", d)
++            printf "pacman\t%s\t%s\n", name, d
++        }
++    '
++}
++
++# Mesma ideia, mas só AUR (yay -Ssa restringe a busca ao AUR, evitando
++# duplicar o que o repo oficial já mostrou em _search_repo).
++_search_aur() {
++    command -v yay >/dev/null 2>&1 || return 0
++    LC_ALL=C yay -Ssa "$1" 2>/dev/null | awk '
++        /^aur\// {
++            split($1, a, "/"); name = a[2]
++            d = ""
++            if ((getline d) > 0) sub(/^[ \t]+/, "", d)
++            printf "yay\t%s\t%s\n", name, d
++        }
++    '
++}
++
++# Busca unificada repo oficial + AUR num menu fzf só. TAB/espaço marca
++# vários, Enter instala os marcados delegando pro 'cmd_install' (que já
++# resolve pacman vs AUR sozinho por pacote) — fecha o ciclo
++# descobrir → declarar num comando só.
++cmd_search() {
++    (( $# )) || die "Uso: search <termo>"
++    command -v fzf >/dev/null 2>&1 || die "fzf não encontrado. Instale com: arn install fzf"
++    local term="$*"
++
++    _load_installed_set
++
++    info "Buscando '$term' no repo oficial e no AUR..."
++    local results
++    results="$( { _search_repo "$term"; _search_aur "$term"; } )"
++    [[ -n "$results" ]] || { warn "Nada encontrado pra '$term'."; return; }
++
++    local lines=() manager name desc status
++    while IFS=$'\t' read -r manager name desc; do
++        [[ -z "$name" ]] && continue
++        status="---"
++        _is_installed "$name" && status="ok"
++        lines+=("$(printf '%-7s %-4s %-30s %s' "$manager" "$status" "$name" "$desc")")
++    done <<< "$results"
++
++    (( ${#lines[@]} )) || { warn "Nada encontrado pra '$term'."; return; }
++
++    local chosen
++    chosen=$(printf '%s\n' "${lines[@]}" | sort -k3 | fzf \
++        --multi \
++        --header 'TAB/espaço: marca vários  •  Enter: instala via arn install  •  ESC: cancela')
++
++    [[ -z "$chosen" ]] && { info "Cancelado."; return; }
++
++    local pkgs=()
++    while IFS= read -r line; do
++        [[ -z "$line" ]] && continue
++        pkgs+=("$(awk '{print $3}' <<< "$line")")
++    done <<< "$chosen"
++
++    (( ${#pkgs[@]} )) && cmd_install "${pkgs[@]}"
++}
++
+ # Menu interativo (fzf) que junta duas ações num só lugar:
+ #   TAB/espaço/enter → marca vários pacotes
+ #   D (maiúsculo)    → remove do .conf os marcados que já são gerenciados
+@@ -991,6 +1061,7 @@ ${BOLD}arn${NC} — Arnyx, gerenciador declarativo de pacotes para CachyOS
+ ${BOLD}COMANDOS${NC}
+   init                    Cria o arquivo packages.conf inicial
+   install <pkg>           Detecta pacman/AUR sozinho, adiciona e instala
++  search <termo>          Busca no repo oficial + AUR, menu fzf pra instalar direto
+   manage                  Menu fzf: só pendentes+manuais (o que precisa de decisão)
+   manage --all            Menu fzf: lista completa, incluindo já 100% ok
+   add <pacman|yay> <pkg>  Adiciona ao .conf e instala numa seção específica
+@@ -1010,6 +1081,7 @@ ${BOLD}COMANDOS${NC}
+ 
+ ${BOLD}ALIASES FISH${NC}
+   arni                    → arn install
++  arnf                    → arn search
+   arnrm                   → arn remove
+   arns                    → arn sync
+   arnr                    → arn rebuild
+@@ -1037,6 +1109,7 @@ esac
+ case "${1:-help}" in
+     init)    cmd_init ;;
+     install) shift; cmd_install "$@" ;;
++    search)  shift; cmd_search "$@" ;;
+     manage)  shift; cmd_manage "$@" ;;
+     add)     shift; cmd_add "$@" ;;
+     remove)  shift; cmd_remove "$@" ;;
+-- 
+2.43.0
+
