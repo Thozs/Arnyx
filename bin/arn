@@ -773,10 +773,6 @@ cmd_diff() {
     echo
 }
 
-# Por que esse pacote está instalado? Junta duas fontes:
-#   1. O .conf do Arnyx — foi você quem declarou?
-#   2. O "Install Reason" do próprio pacman — explícito ou dependência
-#      (e, se dependência, quem depende dele via 'pactree -r').
 cmd_why() {
     (( $# == 1 )) || die "Uso: why <pacote>"
     local pkg="$1"
