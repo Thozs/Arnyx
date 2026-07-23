@@ -180,6 +180,8 @@ Ideias exploradas mas ainda não implementadas — na fila pra quando der:
 - [ ] **Downgrade real de pacotes** — `arn rollback <N> --downgrade` (ou `arn downgrade`): compara o log de versões da geração com o instalado hoje, reinstala via cache local do pacman (`pacman -U`) os que mudaram; avisa sobre `IgnorePkg` pra não ser sobrescrito no próximo upgrade
 - [ ] **Snapshot via Btrfs** — ponto de restauração real do sistema antes de operações arriscadas
 - [ ] **Camada de config declarativa** — versionar dotfiles (Hyprland, shell, etc.), não só pacotes
+- [ ] **Motivo de instalação no `.conf`** — `arn install <pkg> -m "motivo"` grava um comentário acima do pacote no `.conf`, pra responder "por que instalei isso?" sem depender de memória
+- [ ] **`arn health`** — checagem pós-upgrade: pacotes órfãos (`pacman -Qdt`), `.pacnew` pendentes, serviços `systemd` que falharam desde o boot
 
 ---
 
