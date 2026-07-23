@@ -21,7 +21,6 @@ set -euo pipefail
 ARNYX_REPO="https://github.com/Thozs/Arnyx.git"
 CONFIG_REPO="${1:-}"
 
-# ── Cores ──────────────────────────────────────────────────
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
 BLUE=$'\033[0;34m'; CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; NC=$'\033[0m'
 
@@ -46,7 +45,6 @@ echo -e "$msg"
 read -rp "Continuar? [s/N] " confirm
 [[ "$confirm" =~ ^[sS]$ ]] || { info "Cancelado."; exit 0; }
 
-# ── 1. Dependências base ─────────────────────────────────────
 header "1/4 — Dependências base"
 if ! command -v git >/dev/null 2>&1 || ! pacman -Qg base-devel &>/dev/null; then
     info "Instalando git e base-devel..."
@@ -55,7 +53,6 @@ else
     ok "git e base-devel já instalados."
 fi
 
-# ── 2. Instalar o Arnyx ───────────────────────────────────────
 header "2/4 — Instalando o Arnyx"
 tmp_arnyx="$(mktemp -d)"
 git clone --depth 1 "$ARNYX_REPO" "$tmp_arnyx"
@@ -63,7 +60,6 @@ sudo install -Dm755 "$tmp_arnyx/bin/arn" /usr/local/bin/arn
 rm -rf "$tmp_arnyx"
 ok "arn instalado em /usr/local/bin/arn"
 
-# ── 3. Bootstrap do yay ───────────────────────────────────────
 header "3/4 — yay (AUR helper)"
 if command -v yay >/dev/null 2>&1; then
     ok "yay já instalado."
@@ -76,7 +72,6 @@ else
     ok "yay instalado."
 fi
 
-# ── 4. Configuração ───────────────────────────────────────────
 header "4/4 — Configuração"
 mkdir -p "$HOME/.config/arnyx"
 conf_dst="$HOME/.config/arnyx/packages.conf"
