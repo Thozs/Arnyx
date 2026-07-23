@@ -11,7 +11,8 @@
 #   3. Rode 'arnb' quando quiser sincronizar.
 
 set -g ARNYX_CONF_PATH  ~/.config/arnyx/packages.conf
-set -g ARNYX_CONFIG_REPO ~/arnyx-config
+# Caminho para o seu repositório Git pessoal
+set -g ARNYX_CONFIG_REPO ~/meu-repositorio
 
 function arnyx-backup --description "Sobe o packages.conf real pro repositório de config"
     if not test -f "$ARNYX_CONF_PATH"

@@ -22,6 +22,7 @@ Você declara o que quer num arquivo. O `arn` garante que o sistema reflita isso
   - [Instalação rápida (sistema novo/formatado)](#instalação-rápida-sistema-novoformatado)
 - [Backup automático do config pessoal (fish)](#backup-automático-do-config-pessoal-fish)
 - [Aliases](#aliases)
+- [Automatização Aliases](#automatização-do-aliases-fish)
 - [Roadmap](#roadmap)
 - [Por que "Arnyx"?](#por-que-arnyx)
 - [Licença](#licença)
@@ -35,8 +36,6 @@ Projeto pessoal, em desenvolvimento desde 7 de maio de 2026. Construído com aju
 Arch/CachyOS não tem um jeito nativo de dizer *"esse é o conjunto exato de pacotes que eu quero instalado"* — você vai instalando e desinstalando coisa ao longo do tempo, e o sistema vira um acúmulo de decisões que ninguém lembra mais o porquê.
 
 **Arnyx** resolve isso com um arquivo (`packages.conf`) que descreve o estado desejado do sistema. O comando `arn` compara esse arquivo com o que está de fato instalado e sincroniza os dois — instalando o que falta, e opcionalmente removendo o que sobrou.
-
-Não é NixOS. Não tem reprodutibilidade bit-a-bit, nem rollback atômico, nem *derivations*. É um wrapper honesto sobre `pacman`/`yay` que pega emprestada a *filosofia* — declare, não instale na mão — sem fingir ser mais do que é.
 
 ---
 
@@ -61,7 +60,7 @@ Por baixo:
 
 ---
 
-## Instalação
+## Instalação manual
 
 ```bash
 git clone https://github.com/Thozs/arnyx.git
@@ -89,20 +88,20 @@ O `bootstrap.sh` instala `git`/`base-devel`, compila o `yay` do zero e instala o
 
 ## Backup automático do config pessoal (fish)
 
-Se você seguiu o padrão de repositório de config separado (veja "Instalação rápida" acima), o arquivo [`examples/arnyx-backup.fish`](examples/arnyx-backup.fish) automatiza o envio do seu `packages.conf` real pra esse repositório.
+Se você estiver usando um repositório separado para armazenar suas configurações (veja Instalação rápida), o arquivo examples/arnyx-backup.fish automatiza o backup do seu packages.conf para esse repositório.
 
 ```fish
 # ajuste os dois caminhos no topo do arquivo pro seu caso, depois:
 source /caminho/pra/arnyx-backup.fish
 ```
 
-Adicione essa linha no seu `config.fish` pra ter o comando sempre disponível. Depois, sempre que quiser sincronizar seu `packages.conf` real com o repositório de config:
+Adicione essa linha ao seu config.fish para deixar o comando sempre disponível. Depois, sempre que quiser sincronizar seu packages.conf com o repositório de configuração, executa o comando:
 
 ```fish
 arnb
 ```
 
-Ele copia o `.conf` atual, verifica se algo mudou desde o último backup (não faz commit vazio à toa), e sobe pro repositório.
+Ele copia o `.conf` atual, verifica se algo mudou desde o último backup (não faz commit vazio à toa), e sobe pro repositório que estiver o seu backup.
 
 ---
 
@@ -115,6 +114,19 @@ Arquivos prontos pra copiar, gerados automaticamente a partir dali:
 
 - [Fish](aliases/fish/aliases.fish)
 - [Bash / Zsh](aliases/sh/aliases.sh)
+
+## Automatização do Aliases (Fish)
+
+```bash
+arn aliases install
+```
+
+Detecta se você usa fish, mostra os aliases antes de aplicar, pede confirmação, e cria
+`~/.config/fish/conf.d/arnyx-aliases.fish`. Bash/zsh continuam manuais (copie de
+`aliases/sh/aliases.sh`).
+
+Se os aliases ainda não estiverem instalados, o `arn` avisa automaticamente (1x por dia)
+oferecendo instalar, adiar, ou não perguntar mais.
 
 <details>
 <summary>Contribuindo / editando os aliases (não necessário só pra usar o Arnyx)</summary>
