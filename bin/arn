@@ -773,6 +773,52 @@ cmd_diff() {
     echo
 }
 
+# Por que esse pacote está instalado? Junta duas fontes:
+#   1. O .conf do Arnyx — foi você quem declarou?
+#   2. O "Install Reason" do próprio pacman — explícito ou dependência
+#      (e, se dependência, quem depende dele via 'pactree -r').
+cmd_why() {
+    (( $# == 1 )) || die "Uso: why <pacote>"
+    local pkg="$1"
+
+    pacman -Qi "$pkg" &>/dev/null || die "'$pkg' não está instalado."
+
+    header "Why — $pkg"
+
+    if get_section "pacman" | grep -qx "$pkg"; then
+        ok "Declarado no .conf, seção [pacman] — você escolheu instalar."
+    elif get_section "yay" | grep -qx "$pkg"; then
+        ok "Declarado no .conf, seção [yay] — você escolheu instalar."
+    else
+        warn "NÃO está no .conf do Arnyx (instalado manualmente ou como dependência solta)."
+    fi
+
+    local reason
+    reason="$(LC_ALL=C pacman -Qi "$pkg" | awk -F': ' '/^Install Reason/{print $2; exit}')"
+    echo -e "\n${BOLD}Install Reason (pacman):${NC} $reason"
+
+    if [[ "$reason" == Explicitly* ]]; then
+        info "Foi instalado diretamente — não é dependência de nada."
+        return
+    fi
+
+    if ! command -v pactree &>/dev/null; then
+        warn "pactree não encontrado (pacote pacman-contrib). Instale pra ver quem depende dele: arn install pacman-contrib"
+        return
+    fi
+
+    local rev_deps
+    rev_deps="$(pactree -r "$pkg" 2>/dev/null | tail -n +2)"
+    echo -e "\n${BOLD}Quem depende de '$pkg' (árvore reversa):${NC}"
+    if [[ -n "$rev_deps" ]]; then
+        echo "$rev_deps" | sed 's/^/  /'
+    else
+        echo "  (nada depende diretamente dele)"
+        warn "Dependência sem nada usando — candidato a órfão. 'arn rebuild' já limpa isso se ele saiu do .conf."
+    fi
+    echo
+}
+
 cmd_edit() {
     need_conf
     "${EDITOR:-nano}" "$CONF"
@@ -1074,6 +1120,7 @@ ${BOLD}COMANDOS${NC}
   upgrade yay             Atualiza somente pacotes AUR
   list                    Lista pacotes com versão e status
   diff                    Mostra divergências entre .conf, lock e sistema
+  why <pkg>               Por que está instalado: declarado por você ou dependência de quê
   edit                    Abre o .conf no \$EDITOR
   rollback                Menu fzf com as gerações salvas (snapshots de sync/rebuild)
   rollback <N>            Restaura o .conf da geração N direto
@@ -1090,6 +1137,7 @@ ${BOLD}ALIASES FISH${NC}
   arnua                   → arn upgrade yay
   arnl                    → arn list
   arnd                    → arn diff
+  arnw                    → arn why
   arne                    → arn edit
   arnm                    → arn manage
   arnma                   → arn manage --all
@@ -1118,6 +1166,7 @@ case "${1:-help}" in
     upgrade) shift; cmd_upgrade "$@" ;;
     list)    cmd_list ;;
     diff)    cmd_diff ;;
+    why)     shift; cmd_why "$@" ;;
     edit)    cmd_edit ;;
     rollback) shift; cmd_rollback "$@" ;;
     aliases) shift; cmd_aliases "$@" ;;
