@@ -206,7 +206,8 @@ cmd_init() {
 EOF
 
     ok "Configuração criada em: $CONF"
-    info "Edite o arquivo e rode 'sync' para aplicar."
+    info "Rode 'arn manage' para adotar os pacotes já instalados no sistema,"
+    info "ou edite o arquivo manualmente e rode 'sync' para aplicar."
 }
 
 # ── Seção: add ───────────────────────────────────────────────
@@ -746,6 +747,119 @@ _write_lock_from_conf() {
     } > "$LOCK"
 }
 
+# ── Seção: aliases ───────────────────────────────────────────
+# Extrai os pares "nome:comando" direto da seção ALIASES FISH do
+# próprio script ($0) — o help embutido é a fonte única da verdade,
+# tanto pro build-aliases.sh (no repo) quanto pra instalação em runtime.
+_aliases_pairs() {
+    local marker='${BOLD}ALIASES FISH${NC}'
+    awk -v marker="$marker" '
+        $0 == marker { capture=1; next }
+        capture && /^[[:space:]]*$/ { exit }
+        capture && /→/ {
+            line=$0
+            sub(/^[ \t]+/, "", line)
+            n=split(line, parts, /[ \t]+→[ \t]+/)
+            if (n==2) print parts[1] ":" parts[2]
+        }
+    ' "$0"
+}
+
+_detect_shell() {
+    ps -p "$PPID" -o comm= 2>/dev/null | tr -d '[:space:]'
+}
+
+_aliases_install() {
+    local shell_name; shell_name="$(_detect_shell)"
+
+    if [[ "$shell_name" != "fish" ]]; then
+        warn "Instalação automática só é suportada pra fish shell por enquanto (detectado: ${shell_name:-desconhecido})."
+        info "Pra bash/zsh, copie manualmente os aliases de: aliases/sh/aliases.sh (no repositório)."
+        return 1
+    fi
+
+    local target="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/arnyx-aliases.fish"
+
+    if [[ -f "$target" ]]; then
+        info "Aliases já instalados em: $target"
+        return 0
+    fi
+
+    local pairs; pairs="$(_aliases_pairs)"
+    [[ -n "$pairs" ]] || die "Não consegui extrair os aliases do próprio script."
+
+    echo
+    info "Isso vai criar: $target"
+    local name cmd
+    while IFS=: read -r name cmd; do
+        [[ -z "$name" ]] && continue
+        echo "  alias $name '$cmd'"
+    done <<< "$pairs"
+
+    local reply
+    read -r -p "$(echo -e "${YELLOW}?${NC} Confirma a criação desse arquivo? [s/N] ")" reply
+    if [[ ! "$reply" =~ ^[sS]$ ]]; then
+        info "Cancelado."
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$target")"
+    {
+        echo "# Gerado por 'arn aliases install' — não edite direto."
+        echo "# Fonte: seção ALIASES FISH em bin/arn"
+        while IFS=: read -r name cmd; do
+            [[ -z "$name" ]] && continue
+            echo "alias $name '$cmd'"
+        done <<< "$pairs"
+    } > "$target"
+
+    ok "Aliases instalados em: $target"
+    info "Abra um terminal novo (ou rode: source $target) pra usar."
+}
+
+cmd_aliases() {
+    case "${1:-}" in
+        install) _aliases_install ;;
+        *) die "Uso: arn aliases install" ;;
+    esac
+}
+
+# Aviso único (por dia, até ser dispensado ou instalado) sugerindo a
+# instalação dos aliases, se ainda não existir e o shell for fish.
+_check_aliases_nag() {
+    [[ -f "$CACHE_DIR/.alias_nag_dismissed" ]] && return 0
+
+    local shell_name; shell_name="$(_detect_shell)"
+    [[ "$shell_name" == "fish" ]] || return 0
+
+    local target="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/arnyx-aliases.fish"
+    [[ -f "$target" ]] && return 0
+
+    local today; today="$(date +%Y-%m-%d)"
+    local last=""
+    [[ -f "$CACHE_DIR/.alias_nag_last_shown" ]] && last="$(cat "$CACHE_DIR/.alias_nag_last_shown" 2>/dev/null)"
+    [[ "$last" == "$today" ]] && return 0
+
+    mkdir -p "$CACHE_DIR"
+    echo "$today" > "$CACHE_DIR/.alias_nag_last_shown"
+
+    echo
+    warn "Você ainda não tem os aliases do arn instalados (arni, arns, arnr...)."
+    local reply
+    read -r -p "$(echo -e "${YELLOW}?${NC} Instalar agora? [s/n/x=não perguntar novamente] ")" reply
+    case "$reply" in
+        s|S) _aliases_install ;;
+        x|X)
+            touch "$CACHE_DIR/.alias_nag_dismissed"
+            info "Ok, não vou perguntar de novo. Rode 'arn aliases install' quando quiser."
+            ;;
+        *)
+            info "Ok, pergunto de novo amanhã. Rode 'arn aliases install' quando quiser."
+            ;;
+    esac
+    echo
+}
+
 # ── Ajuda ────────────────────────────────────────────────────
 usage() {
 cat << EOF
@@ -767,6 +881,7 @@ ${BOLD}COMANDOS${NC}
   list                    Lista pacotes com versão e status
   diff                    Mostra divergências entre .conf, lock e sistema
   edit                    Abre o .conf no \$EDITOR
+  aliases install         Instala os aliases automaticamente (fish, via conf.d)
 
 ${BOLD}ALIASES FISH${NC}
   arni                    → arn install
@@ -789,6 +904,11 @@ EOF
 
 # ── Roteador ─────────────────────────────────────────────────
 case "${1:-help}" in
+    aliases|help|-h|--help) ;;
+    *) _check_aliases_nag ;;
+esac
+
+case "${1:-help}" in
     init)    cmd_init ;;
     install) shift; cmd_install "$@" ;;
     manage)  shift; cmd_manage "$@" ;;
@@ -800,6 +920,7 @@ case "${1:-help}" in
     list)    cmd_list ;;
     diff)    cmd_diff ;;
     edit)    cmd_edit ;;
+    aliases) shift; cmd_aliases "$@" ;;
     help|-h|--help) usage ;;
     *) err "Comando desconhecido: $1"; usage; exit 1 ;;
 esac

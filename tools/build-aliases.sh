@@ -11,7 +11,7 @@ ARN_BIN="$REPO_ROOT/bin/arn"
 OUT_DIR="$REPO_ROOT/aliases"
 
 FISH_OUT="$OUT_DIR/fish/aliases.fish"
-SH_OUT="$OUT_DIR/sh/aliases.sh"
+SH_OUT="$OUT_DIR/sh/aliases.sh"   # compartilhado entre bash e zsh (sintaxe idêntica)
 
 if [[ ! -f "$ARN_BIN" ]]; then
     echo "Erro: $ARN_BIN não encontrado." >&2
@@ -20,8 +20,9 @@ fi
 
 # Extrai pares "nome:comando" da seção ALIASES FISH do help embutido em bin/arn.
 # Formato esperado ali: "  arni    → arn install"
-pairs="$(awk '
-    /ALIASES FISH/ { capture=1; next }
+MARKER='${BOLD}ALIASES FISH${NC}'
+pairs="$(awk -v marker="$MARKER" '
+    $0 == marker { capture=1; next }
     capture && /^[[:space:]]*$/ { exit }
     capture && /→/ {
         line=$0
@@ -55,4 +56,4 @@ done <<< "$pairs"
 
 echo "✓ $count aliases gerados a partir de bin/arn"
 echo "✓ $FISH_OUT"
-echo "✓ $SH_OUT"
+echo "✓ $SH_OUT (compartilhado entre bash e zsh)"
