@@ -769,6 +769,15 @@ _detect_shell() {
     ps -p "$PPID" -o comm= 2>/dev/null | tr -d '[:space:]'
 }
 
+# Pergunta pro próprio fish (em runtime) se o alias já existe, sem ler
+# ou logar o conteúdo do config.fish do usuário — cobre qualquer forma
+# que a pessoa tenha definido o alias (nosso arquivo, escrita manual,
+# function custom), sem depender de grep no arquivo dela.
+_aliases_already_present() {
+    command -v fish >/dev/null 2>&1 || return 1
+    fish -c 'functions -q arni' 2>/dev/null
+}
+
 _aliases_install() {
     local shell_name; shell_name="$(_detect_shell)"
 
@@ -780,8 +789,8 @@ _aliases_install() {
 
     local target="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/arnyx-aliases.fish"
 
-    if [[ -f "$target" ]]; then
-        info "Aliases já instalados em: $target"
+    if [[ -f "$target" ]] || _aliases_already_present; then
+        info "Aliases já instalados (ou já definidos de outra forma no seu fish)."
         return 0
     fi
 
@@ -834,14 +843,16 @@ _check_aliases_nag() {
 
     local target="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/arnyx-aliases.fish"
     [[ -f "$target" ]] && return 0
+    _aliases_already_present && return 0
 
     local today; today="$(date +%Y-%m-%d)"
     local last=""
     [[ -f "$CACHE_DIR/.alias_nag_last_shown" ]] && last="$(cat "$CACHE_DIR/.alias_nag_last_shown" 2>/dev/null)"
     [[ "$last" == "$today" ]] && return 0
 
-    mkdir -p "$CACHE_DIR"
+    mkdir -p -m 700 "$CACHE_DIR"
     echo "$today" > "$CACHE_DIR/.alias_nag_last_shown"
+    chmod 600 "$CACHE_DIR/.alias_nag_last_shown" 2>/dev/null
 
     echo
     warn "Você ainda não tem os aliases do arn instalados (arni, arns, arnr...)."
@@ -851,6 +862,7 @@ _check_aliases_nag() {
         s|S) _aliases_install ;;
         x|X)
             touch "$CACHE_DIR/.alias_nag_dismissed"
+            chmod 600 "$CACHE_DIR/.alias_nag_dismissed" 2>/dev/null
             info "Ok, não vou perguntar de novo. Rode 'arn aliases install' quando quiser."
             ;;
         *)
