@@ -21,6 +21,7 @@ Você declara o que quer num arquivo. O `arn` garante que o sistema reflita isso
 - [Instalação](#instalação)
   - [Instalação rápida (sistema novo/formatado)](#instalação-rápida-sistema-novoformatado)
 - [Backup automático do config pessoal (fish)](#backup-automático-do-config-pessoal-fish)
+- [Rollback (Generations)](#rollback-generations)
 - [Aliases](#aliases)
 - [Automatização Aliases](#automatização-do-aliases-fish)
 - [Roadmap](#roadmap)
@@ -51,6 +52,7 @@ Arch/CachyOS não tem um jeito nativo de dizer *"esse é o conjunto exato de pac
 | `arn diff` | Compara `.conf`, `.lock` e sistema real |
 | `arn list` | Lista tudo com versão e status |
 | `arn upgrade` | Atualiza pacman + AUR |
+| `arn rollback [N]` | Restaura um `.conf` anterior (menu fzf se `N` não for informado) |
 
 Por baixo:
 - **Zero dependência de Python** — parsing do `.conf` inteiro em `awk`/`grep` puro
@@ -105,6 +107,23 @@ Ele copia o `.conf` atual, verifica se algo mudou desde o último backup (não f
 
 ---
 
+## Rollback (Generations)
+
+Todo `sync` ou `rebuild` que efetivamente muda o `.conf` salva uma **geração**: um snapshot desse `.conf` no momento, mais um log das versões instaladas naquela hora. Não duplica se nada mudou desde a última.
+
+```bash
+arn rollback        # menu fzf com as gerações salvas (mais recente primeiro)
+arn rollback <N>    # vai direto pra geração N
+```
+
+Antes de aplicar, mostra o diff contra o `.conf` atual, o log de versões daquele momento, e pede confirmação `[s/N]`. O `.conf` anterior é sempre salvo como backup (`packages.conf.antes-rollback-N`) antes de sobrescrever.
+
+**Importante:** isso restaura a *lista* de pacotes declarados, não trava a versão exata — o pacman não faz downgrade sozinho, então o log de versões é só referência/auditoria. Depois do rollback, rode `arn rebuild --dry-run` pra ver o impacto real ou `arn sync` pra só instalar o que falta.
+
+As gerações ficam em `~/.local/state/arnyx/generations/`, com as 20 mais recentes mantidas (as antigas são podadas automaticamente).
+
+---
+
 ## Aliases
 
 Os aliases (`arni`, `arns`, `arnr`, etc.) ficam documentados na seção `ALIASES FISH`
@@ -155,7 +174,6 @@ atualizados no mesmo commit.
 
 Ideias exploradas mas ainda não implementadas — na fila pra quando der:
 
-- [ ] **Rollback de generations** — histórico navegável de `.conf`/`.lock`, tipo `arn rollback <N>`
 - [ ] **Snapshot via Btrfs** — ponto de restauração real do sistema antes de operações arriscadas
 - [ ] **Camada de config declarativa** — versionar dotfiles (Hyprland, shell, etc.), não só pacotes
 
