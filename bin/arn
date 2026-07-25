@@ -1002,6 +1002,16 @@ _aliases_already_present() {
     fish -c 'functions -q arni' 2>/dev/null
 }
 
+_aliases_render() {
+    local pairs="$1" name cmd
+    echo "# Gerado por 'arn aliases install' — não edite direto."
+    echo "# Fonte: seção ALIASES FISH em bin/arn"
+    while IFS=: read -r name cmd; do
+        [[ -z "$name" ]] && continue
+        echo "alias $name '$cmd'"
+    done <<< "$pairs"
+}
+
 _aliases_install() {
     local shell_name; shell_name="$(_detect_shell)"
 
@@ -1013,13 +1023,37 @@ _aliases_install() {
 
     local target="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/arnyx-aliases.fish"
 
-    if [[ -f "$target" ]] || _aliases_already_present; then
-        info "Aliases já instalados (ou já definidos de outra forma no seu fish)."
+    local pairs; pairs="$(_aliases_pairs)"
+    [[ -n "$pairs" ]] || die "Não consegui extrair os aliases do próprio script."
+    local expected; expected="$(_aliases_render "$pairs")"
+
+    if [[ -f "$target" ]]; then
+        if diff -q <(echo "$expected") "$target" &>/dev/null; then
+            info "Aliases já instalados e atualizados."
+            return 0
+        fi
+
+        warn "Arquivo de aliases existe, mas está desatualizado:"
+        echo
+        diff -u "$target" <(echo "$expected") | grep -E '^[+-]' | grep -Ev '^(\+\+\+|---)' | sed \
+            -e "s/^-/  ${RED}-${NC} /" \
+            -e "s/^+/  ${GREEN}+${NC} /"
+        echo
+
+        local reply
+        read -r -p "$(echo -e "${YELLOW}?${NC} Atualizar $target com os aliases atuais? [s/N] ")" reply
+        [[ "$reply" =~ ^[sS]$ ]] || { info "Cancelado."; return 0; }
+
+        echo "$expected" > "$target"
+        ok "Aliases atualizados em: $target"
+        info "Abra um terminal novo (ou rode: source $target) pra usar."
         return 0
     fi
 
-    local pairs; pairs="$(_aliases_pairs)"
-    [[ -n "$pairs" ]] || die "Não consegui extrair os aliases do próprio script."
+    if _aliases_already_present; then
+        info "Aliases já definidos de outra forma no seu fish."
+        return 0
+    fi
 
     echo
     info "Isso vai criar: $target"
@@ -1037,14 +1071,7 @@ _aliases_install() {
     fi
 
     mkdir -p "$(dirname "$target")"
-    {
-        echo "# Gerado por 'arn aliases install' — não edite direto."
-        echo "# Fonte: seção ALIASES FISH em bin/arn"
-        while IFS=: read -r name cmd; do
-            [[ -z "$name" ]] && continue
-            echo "alias $name '$cmd'"
-        done <<< "$pairs"
-    } > "$target"
+    echo "$expected" > "$target"
 
     ok "Aliases instalados em: $target"
     info "Abra um terminal novo (ou rode: source $target) pra usar."
