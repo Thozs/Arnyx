@@ -144,7 +144,9 @@ arn aliases install
 ```
 
 Detecta se você usa fish, mostra os aliases antes de aplicar, pede confirmação, e cria
-`~/.config/fish/conf.d/arnyx-aliases.fish`. Bash/zsh continuam manuais (copie de
+`~/.config/fish/conf.d/arnyx-aliases.fish`. Se o arquivo já existir mas estiver
+desatualizado em relação ao `bin/arn` atual (ex: alias novo adicionado), mostra o
+diff e pergunta se quer atualizar. Bash/zsh continuam manuais (copie de
 `aliases/sh/aliases.sh`).
 
 Se os aliases ainda não estiverem instalados, o `arn` avisa automaticamente (1x por dia)
