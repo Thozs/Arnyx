@@ -156,15 +156,22 @@ oferecendo instalar, adiar, ou não perguntar mais.
 <summary>Contribuindo / editando os aliases (não necessário só pra usar o Arnyx)</summary>
 
 Um hook de commit (`.githooks/pre-commit`) regenera esses arquivos sozinho sempre que
-`bin/arn` muda — não precisa rodar nada na mão. Isso só importa se você clonou o
+o código-fonte muda — não precisa rodar nada na mão. Isso só importa se você clonou o
 repositório completo pra mexer no código-fonte; quem só instala e usa o `arn` nunca
 precisa disso.
+
+Nota sobre `bin/arn`: esse arquivo é **gerado** (igual os aliases acima) a partir de
+`src/core.sh` (núcleo, editado à mão) + `backends/arch/` (lógica específica de cada
+fonte de pacote — `pacman` e `aur`), via `tools/build-arn.sh`. Continua sendo
+commitado no git — quem só instala via `bootstrap.sh` ou clona e roda
+`install -Dm755 bin/arn ...` não percebe diferença nenhuma. Só importa pra quem for
+mexer no código: edite `src/core.sh`/`backends/`, nunca `bin/arn` direto.
 
 Pra ativar, uma vez por clone:
 
 ```bash
 git config core.hooksPath .githooks
-chmod +x .githooks/pre-commit tools/build-aliases.sh
+chmod +x .githooks/pre-commit tools/build-arn.sh tools/build-aliases.sh
 ```
 
 Depois disso, editar um alias é só mexer na seção `ALIASES FISH` do `bin/arn` e

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# .githooks/pre-commit — se bin/arn está no commit, regenera aliases/
-# automaticamente (via tools/build-aliases.sh) e inclui no mesmo commit.
+# .githooks/pre-commit — se src/core.sh ou backends/**/*.sh mudou neste
+# commit, regenera bin/arn (via tools/build-arn.sh) e, na sequência,
+# aliases/ (via tools/build-aliases.sh, já que a seção ALIASES FISH lida
+# de dentro do bin/arn recém-gerado pode ter mudado) — tudo incluído no
+# mesmo commit.
 #
 # Setup (uma vez só, por clone):
 #   git config core.hooksPath .githooks
@@ -9,17 +12,24 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-# Só faz algo se bin/arn estiver staged neste commit
-if ! git diff --cached --name-only | grep -qx "bin/arn"; then
+# Só faz algo se o núcleo (core.sh) ou algum backend estiver staged
+if ! git diff --cached --name-only | grep -qE '^(src/core\.sh|backends/.*\.sh)$'; then
     exit 0
 fi
 
-echo ":: bin/arn mudou — regenerando aliases/ a partir dele..."
+echo ":: src/core.sh ou backends/ mudou — regenerando bin/arn..."
+
+if ! ./tools/build-arn.sh; then
+    echo "✗ build-arn.sh falhou — commit abortado." >&2
+    exit 1
+fi
+
+echo ":: regenerando aliases/ a partir do bin/arn recém-gerado..."
 
 if ! ./tools/build-aliases.sh; then
     echo "✗ build-aliases.sh falhou — commit abortado." >&2
     exit 1
 fi
 
-git add aliases/
-echo "✓ aliases/ atualizado e incluído neste commit."
+git add bin/arn aliases/
+echo "✓ bin/arn e aliases/ atualizados e incluídos neste commit."
