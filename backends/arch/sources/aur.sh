@@ -1,23 +1,8 @@
 #!/usr/bin/env bash
-# backends/arch/sources/aur.sh
+# backends/arch/sources/aur.sh — AUR, via helper (yay hoje; paru é item 3 do
+# roadmap). aur_detect_helper() é o único lugar que muda quando paru entrar.
 #
-# Fonte: AUR, via helper (yay hoje; paru é item 3 do roadmap).
-#
-# aur_detect_helper() isola a escolha do binário: hoje retorna "yay" fixo,
-# mas é o ÚNICO lugar que vai precisar mudar quando o suporte a paru
-# entrar — aur_install/aur_search/etc. não precisam ser tocadas.
-#
-# Contrato per-source (fala com o catálogo REMOTO do AUR):
-#   aur_available(pkg)        -> exit 0/1
-#   aur_search(termo)         -> stdout: "yay\tnome\tdescrição" por linha
-#                                 (nome do manager no .conf continua "yay",
-#                                 só o vocabulário interno do código é "aur")
-#   aur_install(pkg)          -> exit 0/!=0
-#   aur_install_batch(pkgs...)-> exit 0/!=0
-#   aur_upgrade()             -> exit 0/!=0
-#
-# is_installed / remove / list_explicit NÃO estão aqui — ver pacman.sh
-# pro motivo (banco local do pacman é compartilhado entre as duas fontes).
+# is_installed/remove/list_explicit ficam em src/core.sh (ver pacman.sh).
 
 aur_detect_helper() {
     echo "yay"

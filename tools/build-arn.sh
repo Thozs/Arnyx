@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-# build-arn.sh — gera bin/arn concatenando backends/arch/arch.sh +
-# backends/arch/sources/{pacman,aur}.sh + src/core.sh, nessa ordem.
-#
-# A ordem é só por legibilidade (camadas de baixo pra cima) — bash não
-# exige que funções estejam definidas antes de outras no arquivo, só
-# antes de serem CHAMADAS, e isso só acontece no `case` de dispatch no
-# fim do core.sh. Não editar bin/arn diretamente — editar src/core.sh
-# ou backends/ e rodar este script de novo.
+# build-arn.sh — gera bin/arn concatenando arch.sh + sources/{pacman,aur}.sh
+# + src/core.sh. Não editar bin/arn direto — editar aqui/backends/ e rodar
+# este script de novo.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,18 +19,11 @@ for f in "$ARCH_GLUE" "$PACMAN_SRC" "$AUR_SRC" "$CORE"; do
 done
 
 mkdir -p "$(dirname "$OUT")"
-
 {
     echo "#!/usr/bin/env bash"
-    echo "# ============================================================"
     echo "# bin/arn — GERADO por tools/build-arn.sh. NÃO EDITE DIRETAMENTE."
-    echo "# Fonte: backends/arch/{arch.sh,sources/pacman.sh,sources/aur.sh}"
-    echo "#        + src/core.sh"
-    echo "# Pra mexer no arn: edite os arquivos acima e rode ./tools/build-arn.sh"
-    echo "# ============================================================"
+    echo "# Fonte: backends/arch/{arch.sh,sources/pacman.sh,sources/aur.sh} + src/core.sh"
     echo
-
-    # Corta o shebang de cada arquivo fonte (já emitimos um só no topo).
     tail -n +2 "$ARCH_GLUE"
     echo
     tail -n +2 "$PACMAN_SRC"
@@ -45,5 +34,4 @@ mkdir -p "$(dirname "$OUT")"
 } > "$OUT"
 
 chmod +x "$OUT"
-
 echo "✓ bin/arn gerado a partir de backends/ + src/core.sh"
