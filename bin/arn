@@ -196,6 +196,9 @@ err()    { echo -e "${RED}✗${NC}  $*" >&2; }
 header() { echo -e "\n${BOLD}${BLUE}══ $* ══${NC}"; }
 die()    { err "$*"; exit 1; }
 
+command -v pacman >/dev/null 2>&1 || die "Isso não é um sistema Arch-based (pacman não encontrado)."
+[[ "$EUID" -ne 0 ]] || die "Não rode o arn como root — os arquivos de cache/config seriam criados como root e quebrariam as permissões pro uso normal (sem sudo) depois."
+
 need_conf() {
     [[ -f "$CONF" ]] || die "Arquivo de configuração não encontrado: $CONF\n   Rode: arn init"
 }
