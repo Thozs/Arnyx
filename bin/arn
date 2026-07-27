@@ -368,7 +368,9 @@ cmd_add() {
 _resolve_pkg_name() {
     local manager="$1" pkg="$2"
     if [[ "$manager" == "yay" ]]; then
-        yay -Si "$pkg" &>/dev/null && { echo "$pkg"; return 0; }
+        local helper; helper="$(aur_detect_helper)"
+        command -v "$helper" >/dev/null 2>&1 || { err "'$helper' não encontrado. Instale o helper AUR antes de continuar."; return 1; }
+        "$helper" -Si "$pkg" &>/dev/null && { echo "$pkg"; return 0; }
     else
         pacman -Si "$pkg" &>/dev/null && { echo "$pkg"; return 0; }
     fi
@@ -378,7 +380,9 @@ _resolve_pkg_name() {
 _search_similar_names() {
     local manager="$1" pkg="$2"
     if [[ "$manager" == "yay" ]]; then
-        yay -Ss "$pkg" 2>/dev/null
+        local helper; helper="$(aur_detect_helper)"
+        command -v "$helper" >/dev/null 2>&1 || return 0
+        "$helper" -Ss "$pkg" 2>/dev/null
     else
         pacman -Ss "$pkg" 2>/dev/null
     fi | awk '/^[a-zA-Z0-9_.+-]+\// {print $1}' | cut -d/ -f2 | head -n 8
