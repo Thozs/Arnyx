@@ -179,6 +179,12 @@ commitar normalmente — `tools/build-aliases.sh` roda automático e inclui os a
 atualizados no mesmo commit.
 
 </details>
+---
+
+## NixOS (beta)
+
+Migrei meu próprio sistema pra NixOS e comecei a portar o `arn` pra lá — em [`backends/NixOS/`](backends/NixOS). Como o Nix já é declarativo por natureza, a versão NixOS é menor,sem AUR, sem detecção de pacote "instalado manualmente", e o `rollback` usa as gerações do sistema em vez de um snapshot do `.conf`.
+Ainda em construção e só testado no meu próprio setup. Comandos disponíveis: `install`, `remove`, `search`, `manage`, `sync`/`rebuild` (com `--dry-run`), `upgrade`, `list`, `diff`, `edit`, `rollback` e `aliases install`.
 
 ---
 
