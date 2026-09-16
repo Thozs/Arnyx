@@ -29,7 +29,7 @@ err()    { echo -e "${RED}✗${NC}  $*" >&2; }
 header() { echo -e "\n${BOLD}${BLUE}══ $* ══${NC}"; }
 die()    { err "$*"; exit 1; }
 
-command -v pacman >/dev/null 2>&1 || die "Isso não é um sistema Arch-based (pacman não encontrado)."
+backend_check_available || die "$(backend_unavailable_msg)"
 [[ "$EUID" -ne 0 ]] || die "Não rode o arn como root — os arquivos de cache/config seriam criados como root e quebrariam as permissões pro uso normal (sem sudo) depois."
 
 need_conf() {
@@ -43,7 +43,8 @@ need_conf() {
 # (instalou/removeu algo), usando o mtime do diretório como gatilho.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/arnyx"
 CACHE_FILE="$CACHE_DIR/installed.cache"
-PACMAN_LOCAL_DB="/var/lib/pacman/local"
+# PKG_DB_PATH é definido pelo backend (arch.sh/gentoo.sh), concatenado
+# antes deste arquivo por tools/build-arn.sh.
 
 declare -A INSTALLED_SET=()
 declare -A INSTALLED_VER=()
@@ -52,14 +53,14 @@ declare -A EXPLICIT_SET=()
 _installed_cache_valid() {
     [[ -f "$CACHE_FILE" ]] || return 1
     local db_mtime cache_mtime
-    db_mtime=$(stat -c %Y "$PACMAN_LOCAL_DB" 2>/dev/null) || return 1
+    db_mtime=$(stat -c %Y "$PKG_DB_PATH" 2>/dev/null) || return 1
     cache_mtime=$(head -n1 "$CACHE_FILE" 2>/dev/null)
     [[ -n "$cache_mtime" && "$db_mtime" == "$cache_mtime" ]]
 }
 
 _write_installed_cache() {
     mkdir -p "$CACHE_DIR" 2>/dev/null
-    local db_mtime; db_mtime=$(stat -c %Y "$PACMAN_LOCAL_DB" 2>/dev/null) || return
+    local db_mtime; db_mtime=$(stat -c %Y "$PKG_DB_PATH" 2>/dev/null) || return
     {
         echo "$db_mtime"
         local name exp
@@ -85,28 +86,12 @@ _load_installed_set() {
         return
     fi
 
-    local name="" ver="" reason=""
-    while IFS= read -r line; do
-        case "$line" in
-            Name*)              name="${line#*: }" ;;
-            Version*)           ver="${line#*: }"  ;;
-            "Install Reason"*)  reason="${line#*: }" ;;
-            "")
-                if [[ -n "$name" ]]; then
-                    INSTALLED_SET["$name"]=1
-                    INSTALLED_VER["$name"]="$ver"
-                    [[ "$reason" == Explicitly* ]] && EXPLICIT_SET["$name"]=1
-                fi
-                name=""; ver=""; reason=""
-                ;;
-        esac
-    done < <(LC_ALL=C pacman -Qi)
-    # o último pacote da lista não tem linha em branco depois dele
-    if [[ -n "$name" ]]; then
-        INSTALLED_SET["$name"]=1
-        INSTALLED_VER["$name"]="$ver"
-        [[ "$reason" == Explicitly* ]] && EXPLICIT_SET["$name"]=1
-    fi
+    # backend_populate_installed (definido em backends/<distro>/*.sh) faz
+    # o parsing específico do gerenciador e preenche INSTALLED_SET,
+    # INSTALLED_VER e EXPLICIT_SET diretamente — o formato de "pacote
+    # instalado" difere demais entre pacman -Qi e qlist -Iv pra ter um
+    # parser genérico aqui.
+    backend_populate_installed
 
     _write_installed_cache
 }
@@ -205,7 +190,7 @@ _resolve_pkg_name() {
         command -v "$helper" >/dev/null 2>&1 || { err "'$helper' não encontrado. Instale o helper AUR antes de continuar."; return 1; }
         "$helper" -Si "$pkg" &>/dev/null && { echo "$pkg"; return 0; }
     else
-        pacman -Si "$pkg" &>/dev/null && { echo "$pkg"; return 0; }
+        primary_available "$pkg" && { echo "$pkg"; return 0; }
     fi
     return 1
 }
@@ -215,10 +200,10 @@ _search_similar_names() {
     if [[ "$manager" == "yay" ]]; then
         local helper; helper="$(aur_detect_helper)"
         command -v "$helper" >/dev/null 2>&1 || return 0
-        "$helper" -Ss "$pkg" 2>/dev/null
+        "$helper" -Ss "$pkg" 2>/dev/null | awk '/^[a-zA-Z0-9_.+-]+\// {print $1}' | cut -d/ -f2 | head -n 8
     else
-        pacman -Ss "$pkg" 2>/dev/null
-    fi | awk '/^[a-zA-Z0-9_.+-]+\// {print $1}' | cut -d/ -f2 | head -n 8
+        primary_search "$pkg" 2>/dev/null | cut -f2 | head -n 8
+    fi
 }
 
 # Usado pelo `manage` ao apertar A. Primeiro tenta confirmar que o
@@ -280,10 +265,10 @@ cmd_install() {
             continue
         fi
 
-        if pacman_available "$pkg"; then
+        if primary_available "$pkg"; then
             info "'$pkg' encontrado no repo oficial → pacman"
             cmd_add pacman "$pkg"
-        elif aur_available "$pkg"; then
+        elif secondary_available "$pkg"; then
             info "'$pkg' encontrado no AUR → yay"
             cmd_add yay "$pkg"
         else
@@ -308,7 +293,7 @@ cmd_search() {
 
     info "Buscando '$term' no repo oficial e no AUR..."
     local results
-    results="$( { pacman_search "$term"; aur_search "$term"; } )"
+    results="$( { primary_search "$term"; secondary_search "$term"; } )"
     [[ -n "$results" ]] || { warn "Nada encontrado pra '$term'."; return; }
 
     local lines=() manager name desc status
@@ -369,7 +354,7 @@ cmd_manage() {
     declare -A foreign_set=()
     while read -r pkg; do
         [[ -n "$pkg" ]] && foreign_set["$pkg"]=1
-    done < <(LC_ALL=C pacman -Qmq 2>/dev/null)
+    done < <(backend_foreign_list)
 
     # Por padrão só mostra o que precisa de decisão: pendente (declarado
     # mas não instalado) e manual (instalado mas não declarado). O que
@@ -462,9 +447,9 @@ cmd_remove() {
 
         if [[ -z "$found_in" ]]; then
             warn "'$pkg' não está no .conf"
-            if pacman -Q "$pkg" &>/dev/null; then
+            if pkg_installed_now "$pkg"; then
                 info "Pacote encontrado no sistema. Removendo..."
-                sudo pacman -Rns "$pkg" && ok "Removido: $pkg" || err "Falha ao remover: $pkg"
+                pkg_remove "$pkg" && ok "Removido: $pkg" || err "Falha ao remover: $pkg"
             else
                 err "'$pkg' não está instalado nem no .conf."
             fi
@@ -474,9 +459,9 @@ cmd_remove() {
         _remove_from_conf "$pkg"
         ok "Removido '$pkg' do .conf [$found_in]"
 
-        if pacman -Q "$pkg" &>/dev/null; then
+        if pkg_installed_now "$pkg"; then
             info "Desinstalando $pkg e dependências órfãs..."
-            sudo pacman -Rns "$pkg" && ok "Desinstalado: $pkg" || warn "Falha ao desinstalar. Remova manualmente."
+            pkg_remove "$pkg" && ok "Desinstalado: $pkg" || warn "Falha ao desinstalar. Remova manualmente."
         else
             info "'$pkg' já não estava instalado no sistema."
         fi
@@ -607,7 +592,7 @@ cmd_rebuild() {
             for pkg in "${to_remove[@]}"; do
                 if _is_installed "$pkg"; then
                     warn "Removendo (saiu do .conf): $pkg"
-                    sudo pacman -Rns --noconfirm "$pkg" 2>/dev/null && removed_any=1 || true
+                    pkg_remove_force "$pkg" 2>/dev/null && removed_any=1 || true
                 fi
             done
         else
@@ -627,21 +612,21 @@ cmd_upgrade() {
 
     case "$target" in
         pacman)
-            header "Upgrade — pacman (repositórios oficiais)"
-            info "Atualizando pacman..."
-            pacman_upgrade
+            header "Upgrade — repositório principal"
+            info "Atualizando..."
+            primary_upgrade
             ;;
         yay|aur)
-            header "Upgrade — AUR (yay)"
-            info "Atualizando AUR (yay)..."
-            aur_upgrade
+            header "Upgrade — fonte secundária (AUR/overlay)"
+            info "Atualizando fonte secundária..."
+            secondary_upgrade
             ;;
         all)
             header "Upgrade — atualizando todos os pacotes"
-            info "Atualizando pacman..."
-            pacman_upgrade
-            info "Atualizando AUR (yay)..."
-            aur_upgrade
+            info "Atualizando repositório principal..."
+            primary_upgrade
+            info "Atualizando fonte secundária..."
+            secondary_upgrade
             ;;
         *)
             die "Uso: upgrade [pacman|yay]"
@@ -730,7 +715,7 @@ cmd_why() {
     (( $# == 1 )) || die "Uso: why <pacote>"
     local pkg="$1"
 
-    pacman -Qi "$pkg" &>/dev/null || die "'$pkg' não está instalado."
+    pkg_installed_now "$pkg" || die "'$pkg' não está instalado."
 
     header "Why — $pkg"
 
@@ -743,21 +728,20 @@ cmd_why() {
     fi
 
     local reason
-    reason="$(LC_ALL=C pacman -Qi "$pkg" | awk -F': ' '/^Install Reason/{print $2; exit}')"
-    echo -e "\n${BOLD}Install Reason (pacman):${NC} $reason"
+    reason="$(pkg_install_reason "$pkg")"
+    echo -e "\n${BOLD}Install Reason:${NC} $reason"
 
     if [[ "$reason" == Explicitly* ]]; then
         info "Foi instalado diretamente — não é dependência de nada."
         return
     fi
 
-    if ! command -v pactree &>/dev/null; then
-        warn "pactree não encontrado (pacote pacman-contrib). Instale pra ver quem depende dele: arn install pacman-contrib"
+    local rev_deps
+    rev_deps="$(pkg_reverse_deps "$pkg" 2>/dev/null)"
+    if [[ -z "$rev_deps" ]] && ! command -v pactree &>/dev/null && ! command -v qdepends &>/dev/null; then
+        warn "$(pkg_reverse_deps_tool_hint)"
         return
     fi
-
-    local rev_deps
-    rev_deps="$(pactree -r "$pkg" 2>/dev/null | tail -n +2)"
     echo -e "\n${BOLD}Quem depende de '$pkg' (árvore reversa):${NC}"
     if [[ -n "$rev_deps" ]]; then
         echo "$rev_deps" | sed 's/^/  /'
@@ -766,6 +750,14 @@ cmd_why() {
         warn "Dependência sem nada usando — candidato a órfão. 'arn rebuild' já limpa isso se ele saiu do .conf."
     fi
     echo
+}
+
+cmd_unmask() {
+    (( $# )) || die "Uso: unmask <pacote> [pacote2 ...]"
+    local pkg
+    for pkg in "$@"; do
+        pkg_unmask "$pkg"
+    done
 }
 
 cmd_edit() {
@@ -1098,6 +1090,7 @@ ${BOLD}COMANDOS${NC}
   diff                    Mostra divergências entre .conf, lock e sistema
   why <pkg>               Por que está instalado: declarado por você ou dependência de quê
   edit                    Abre o .conf no \$EDITOR
+  unmask <pkg> [pkg2...]  [Gentoo] Desmascara pacote(s) específico(s) e registra o motivo (não tem alias na tabela comum — veja aliases/fish/gentoo.fish)
   rollback                Menu fzf com as gerações salvas (snapshots de sync/rebuild)
   rollback <N>            Restaura o .conf da geração N direto
   aliases install         Instala os aliases automaticamente (fish, via conf.d)
@@ -1144,6 +1137,7 @@ case "${1:-help}" in
     diff)    cmd_diff ;;
     why)     shift; cmd_why "$@" ;;
     edit)    cmd_edit ;;
+    unmask)  shift; cmd_unmask "$@" ;;
     rollback) shift; cmd_rollback "$@" ;;
     aliases) shift; cmd_aliases "$@" ;;
     help|-h|--help) usage ;;

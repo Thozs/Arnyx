@@ -1,19 +1,32 @@
 #!/usr/bin/env bash
-# bin/arn — GERADO por tools/build-arn.sh. NÃO EDITE DIRETAMENTE.
-# Fonte: backends/arch/{arch.sh,sources/pacman.sh,sources/aur.sh} + src/core.sh
+# bin/arn — GERADO por tools/build-arn.sh --backend=gentoo. NÃO EDITE DIRETAMENTE.
+# Fonte: backends/gentoo/* + src/core.sh
 
-# backends/arch/arch.sh — dispatch: decide pacman vs aur, chama a função certa.
-# "yay" é o nome da seção no .conf do usuário (não muda); "aur" é o vocabulário
-# interno do código.
+# backends/gentoo/gentoo.sh — dispatch e funções genéricas do backend
+# Gentoo/Portage. Diferente do Arch, não existe uma segunda fonte de
+# pacotes tipo AUR aqui — só o Portage. As funções secondary_* existem
+# só pra manter a mesma interface que core.sh espera; a seção [yay] do
+# .conf fica sempre vazia no Gentoo (reservada pra um eventual suporte
+# a overlays no futuro).
+#
+# Pré-requisito no sistema: app-portage/portage-utils (dá o `qlist` e
+# o `qdepends` usados abaixo) — equivalente ao pacman-contrib no Arch.
+#   sudo emerge --ask=n app-portage/portage-utils
 
-ARCH_SOURCES=(pacman aur)
+GENTOO_SOURCES=(portage)
+
+PKG_DB_PATH="/var/db/pkg"
+
+backend_check_available() { command -v emerge >/dev/null 2>&1; }
+backend_unavailable_msg() { echo "Isso não é um sistema Gentoo (emerge não encontrado)."; }
 
 _install_pkg() {
     local manager="$1" pkg="$2"
     if [[ "$manager" == "pacman" ]]; then
-        pacman_install "$pkg" && return 0
+        portage_install "$pkg" && return 0
     else
-        aur_install "$pkg" && return 0
+        warn "Seção '[$manager]' não é suportada no backend Gentoo (só existe [pacman], que aqui significa Portage). Pulando '$pkg'."
+        return 1
     fi
 
     warn "Instalação de '$pkg' falhou. Removendo do .conf..."
@@ -28,142 +41,183 @@ _install_batch() {
     (( ${#pkgs[@]} )) || return 0
 
     if [[ "$manager" == "pacman" ]]; then
-        pacman_install_batch "${pkgs[@]}" && return 0
+        portage_install_batch "${pkgs[@]}" && return 0
     else
-        aur_install_batch "${pkgs[@]}" && return 0
+        warn "Seção '[$manager]' não é suportada no backend Gentoo. Pulando: ${pkgs[*]}"
+        return 0
     fi
 
     warn "Instalação em lote falhou, tentando pacote a pacote pra achar o culpado..."
     local pkg
     for pkg in "${pkgs[@]}"; do
-        pacman -Q "$pkg" &>/dev/null || _install_pkg "$manager" "$pkg" || true
+        pkg_installed_now "$pkg" || _install_pkg "$manager" "$pkg" || true
     done
 }
 
-# backends/arch/sources/pacman.sh — repositórios oficiais do Arch.
-#
-# is_installed/remove/list_explicit ficam em src/core.sh, não aqui — falam
-# com o banco LOCAL do pacman, que enxerga pacotes do AUR também.
+primary_available()   { portage_available "$@"; }
+primary_search()      { portage_search "$@"; }
+primary_upgrade()     { portage_upgrade "$@"; }
 
-pacman_available() {
-    pacman -Si "$1" &>/dev/null
-}
+# Sem fonte secundária no Gentoo — sempre "não encontrado"/"nada a fazer".
+secondary_available() { return 1; }
+secondary_search()    { :; }
+secondary_upgrade()   { :; }
+aur_detect_helper()   { echo ""; }
 
-pacman_search() {
-    LC_ALL=C pacman -Ss "$1" 2>/dev/null | awk '
-        /^[a-zA-Z0-9_.+-]+\// {
-            split($1, a, "/"); name = a[2]
-            d = ""
-            if ((getline d) > 0) sub(/^[ \t]+/, "", d)
-            printf "pacman\t%s\t%s\n", name, d
-        }
-    '
-}
+backend_foreign_list() { :; }  # sem conceito de "estrangeiro" (AUR) no Gentoo
 
-pacman_install() {
-    sudo pacman -S --needed "$1"
-}
+# Preenche INSTALLED_SET/INSTALLED_VER/EXPLICIT_SET a partir do
+# `qlist -Iv` (formato "categoria/nome-versão", uma linha por pacote)
+# cruzado com /var/lib/portage/world pra saber o que foi instalado
+# explicitamente (equivalente ao Install Reason do pacman).
+backend_populate_installed() {
+    command -v qlist >/dev/null 2>&1 || { warn "qlist não encontrado (pacote app-portage/portage-utils). Instale: sudo emerge --ask=n app-portage/portage-utils"; return; }
 
-pacman_install_batch() {
-    local pkgs=("$@")
-    (( ${#pkgs[@]} )) || return 0
-    sudo pacman -S --needed "${pkgs[@]}"
-}
+    declare -A world_set=()
+    if [[ -f /var/lib/portage/world ]]; then
+        local w
+        while IFS= read -r w; do
+            [[ -n "$w" && "$w" != \#* ]] && world_set["$w"]=1
+        done < /var/lib/portage/world
+    fi
 
-pacman_upgrade() {
-    sudo pacman -Syu
-}
-
-# backends/arch/sources/aur.sh — AUR, via yay ou paru.
-#
-# is_installed/remove/list_explicit ficam em src/core.sh (ver pacman.sh).
-
-# Detecta qual AUR helper usar. Se só um dos dois estiver instalado, usa
-# esse direto. Se ambos estiverem, pergunta uma vez e guarda a escolha em
-# $CACHE_DIR/.aur_helper (mesmo padrão de cache usado pro nag de aliases).
-# Se nenhum estiver instalado, retorna "yay" — quem chama já trata o "não
-# encontrado" via `command -v`.
-aur_detect_helper() {
-    local cache_file="$CACHE_DIR/.aur_helper"
-    local have_yay=0 have_paru=0
-    command -v yay  >/dev/null 2>&1 && have_yay=1
-    command -v paru >/dev/null 2>&1 && have_paru=1
-
-    if (( have_yay )) && (( have_paru )); then
-        if [[ -f "$cache_file" ]]; then
-            local saved; saved="$(cat "$cache_file" 2>/dev/null)"
-            [[ "$saved" == "yay" || "$saved" == "paru" ]] && { echo "$saved"; return 0; }
+    local line cat_pkg ver name
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        # "categoria/nome-versao(-rN)?" — captura gulosa garante que
+        # pega o ÚLTIMO "-<digito>..." como início da versão, mesmo
+        # com revisão (-r1) ou hífens no nome do pacote.
+        if [[ "$line" =~ ^(.+)-([0-9][0-9A-Za-z_.]*(-r[0-9]+)?)$ ]]; then
+            cat_pkg="${BASH_REMATCH[1]}"
+            ver="${BASH_REMATCH[2]}"
+        else
+            continue
         fi
+        name="${cat_pkg#*/}"
+        INSTALLED_SET["$name"]=1
+        INSTALLED_VER["$name"]="$ver"
+        if [[ -n "${world_set[$cat_pkg]:-}" || -n "${world_set[$name]:-}" ]]; then
+            EXPLICIT_SET["$name"]=1
+        fi
+    done < <(qlist -Iv 2>/dev/null)
+}
 
-        local reply helper
-        read -r -p "$(echo -e "${YELLOW}?${NC} Você tem yay e paru instalados. Qual usar? [Y/p] ")" reply
-        case "$reply" in
-            p|P) helper="paru" ;;
-            *)   helper="yay"  ;;
-        esac
+pkg_installed_now() {
+    command -v qlist >/dev/null 2>&1 || return 1
+    [[ -n "$(qlist -Ie "$1" 2>/dev/null)" ]]
+}
 
-        mkdir -p -m 700 "$CACHE_DIR" 2>/dev/null
-        echo "$helper" > "$cache_file"
-        chmod 600 "$cache_file" 2>/dev/null
-        echo "$helper"
+pkg_remove()       { sudo emerge --ask --depclean "$1"; }
+pkg_remove_force() { sudo emerge --ask=n --quiet --depclean "$1"; }
+
+pkg_install_reason() {
+    local pkg="$1"
+    if grep -qE "(^|/)${pkg}(:|$)" /var/lib/portage/world 2>/dev/null; then
+        echo "Explicitly installed"
+    else
+        echo "Installed as a dependency"
+    fi
+}
+
+pkg_reverse_deps() {
+    command -v qdepends &>/dev/null || return 1
+    qdepends -C -N -Q "$1" 2>/dev/null
+}
+
+pkg_reverse_deps_tool_hint() {
+    echo "qdepends não encontrado (pacote app-portage/portage-utils). Instale pra ver quem depende dele: sudo emerge --ask=n app-portage/portage-utils"
+}
+
+# Desmascara SÓ o(s) pacote(s) passado(s) — nunca o sistema todo.
+# Usa emerge --autounmask-write, que grava em /etc/portage/package.*
+# (accept_keywords pra ~arch keyword, unmask pra mask de verdade em
+# profiles/package.mask). Registra pacote+motivo+data num log separado
+# em texto simples (não mexe no /etc/portage sem já mostrar o motivo
+# e pedir confirmação antes).
+UNMASK_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/arnyx/gentoo-unmasked.log"
+
+pkg_unmask() {
+    local pkg="$1"
+    header "Unmask — $pkg"
+
+    if emerge --pretend "$pkg" &>/dev/null; then
+        ok "'$pkg' já não está mascarado — nada a fazer."
         return 0
     fi
 
-    (( have_paru )) && { echo "paru"; return 0; }
-    echo "yay"
+    info "Verificando o motivo do mask..."
+    local reason
+    reason="$(emerge --pretend --autounmask=y "$pkg" 2>&1 | grep -E 'masked by|keyword changes are necessary|^\[ebuild' | head -n 6)"
+
+    if [[ -z "$reason" ]]; then
+        err "Não consegui determinar o motivo (nome errado ou erro do emerge). Rode manualmente: emerge --pretend --autounmask=y $pkg"
+        return 1
+    fi
+
+    echo -e "\n${BOLD}Motivo do mask:${NC}"
+    echo "$reason" | sed 's/^/  /'
+    echo
+
+    local reply
+    read -r -p "$(echo -e "${YELLOW}?${NC} Desmascarar '$pkg'? Isso grava em /etc/portage/package.* (só esse pacote). [s/N] ")" reply
+    [[ "$reply" =~ ^[sS]$ ]] || { info "Cancelado — '$pkg' continua mascarado."; return 0; }
+
+    if sudo emerge --ask=n --autounmask=y --autounmask-write "$pkg"; then
+        ok "'$pkg' desmascarado."
+        mkdir -p "$(dirname "$UNMASK_LOG")"
+        {
+            printf '%s | %s | %s\n' \
+                "$(date '+%Y-%m-%d %H:%M:%S')" \
+                "$pkg" \
+                "$(echo "$reason" | tr '\n' ' ' | sed 's/  */ /g')"
+        } >> "$UNMASK_LOG"
+        info "Registrado em: $UNMASK_LOG"
+        warn "Se o emerge avisou sobre arquivos em /etc/portage pra revisar, rode: sudo etc-update (ou dispatch-conf)"
+        info "Depois: arn install $pkg"
+    else
+        err "Falha ao desmascarar '$pkg'. Nada foi registrado no log."
+        return 1
+    fi
 }
 
-aur_available() {
-    local helper; helper="$(aur_detect_helper)"
-    command -v "$helper" >/dev/null 2>&1 || return 1
-    "$helper" -Si "$1" &>/dev/null
+# backends/gentoo/sources/portage.sh — árvore principal do Gentoo (Portage).
+#
+# Upgrade padrão: emerge --sync + emerge -avuDN @world. Não tenta
+# detectar mudanças de CFLAGS/CHOST (o Portage também não detecta
+# isso sozinho) — só USE flags, via --newuse, que é rastreado por
+# pacote de verdade. Rebuild completo (emerge -e @world) fica de fora
+# do escopo por enquanto: se precisar, rode manualmente.
+
+portage_available() {
+    emerge -s "^$1\$" 2>/dev/null | grep -q '^\*'
 }
 
-aur_search() {
-    local helper; helper="$(aur_detect_helper)"
-    command -v "$helper" >/dev/null 2>&1 || return 0
-    LC_ALL=C "$helper" -Ssa "$1" 2>/dev/null | awk -v mgr="$helper" '
-        /^aur\// {
-            split($1, a, "/"); name = a[2]
-            d = ""
-            if ((getline d) > 0) sub(/^[ \t]+/, "", d)
-            printf "%s\t%s\t%s\n", mgr, name, d
+portage_search() {
+    local term="$1"
+    emerge -s "$term" 2>/dev/null | awk -v mgr="pacman" '
+        /^\*/ {
+            name = $2
+            desc = ""
+            getline d
+            if (d ~ /^ {2,}/) { sub(/^[ \t]+/, "", d); desc = d }
+            printf "%s\t%s\t%s\n", mgr, name, desc
         }
     '
 }
 
-# Flags de automação (pular menus interativos) equivalentes entre yay e
-# paru — não são as mesmas flags nos dois. yay: --cleanmenu=false
-# --diffmenu=false. paru não tem equivalente a --cleanmenu; --skipreview
-# cobre o --diffmenu. --removemake existe com o mesmo nome nos dois.
-_aur_noninteractive_flags() {
-    if [[ "$1" == "paru" ]]; then
-        echo "--skipreview --removemake"
-    else
-        echo "--cleanmenu=false --diffmenu=false --removemake"
-    fi
+portage_install() {
+    sudo emerge --ask=n "$1"
 }
 
-aur_install() {
-    local helper; helper="$(aur_detect_helper)"
-    command -v "$helper" >/dev/null 2>&1 || { err "'$helper' não encontrado. Instale o helper AUR antes de continuar."; return 1; }
-    local flags; read -ra flags <<< "$(_aur_noninteractive_flags "$helper")"
-    "$helper" -S --needed "${flags[@]}" "$1"
-}
-
-aur_install_batch() {
-    local helper; helper="$(aur_detect_helper)"
-    command -v "$helper" >/dev/null 2>&1 || { err "'$helper' não encontrado. Instale o helper AUR antes de continuar."; return 1; }
+portage_install_batch() {
     local pkgs=("$@")
     (( ${#pkgs[@]} )) || return 0
-    local flags; read -ra flags <<< "$(_aur_noninteractive_flags "$helper")"
-    "$helper" -S --needed "${flags[@]}" "${pkgs[@]}"
+    sudo emerge --ask=n "${pkgs[@]}"
 }
 
-aur_upgrade() {
-    local helper; helper="$(aur_detect_helper)"
-    command -v "$helper" >/dev/null 2>&1 || { err "'$helper' não encontrado. Instale o helper AUR antes de continuar."; return 1; }
-    "$helper" -Syu --aur
+portage_upgrade() {
+    sudo emerge --sync
+    sudo emerge --ask=n --verbose --update --deep --newuse @world
 }
 
 # ============================================================
@@ -196,7 +250,7 @@ err()    { echo -e "${RED}✗${NC}  $*" >&2; }
 header() { echo -e "\n${BOLD}${BLUE}══ $* ══${NC}"; }
 die()    { err "$*"; exit 1; }
 
-command -v pacman >/dev/null 2>&1 || die "Isso não é um sistema Arch-based (pacman não encontrado)."
+backend_check_available || die "$(backend_unavailable_msg)"
 [[ "$EUID" -ne 0 ]] || die "Não rode o arn como root — os arquivos de cache/config seriam criados como root e quebrariam as permissões pro uso normal (sem sudo) depois."
 
 need_conf() {
@@ -210,7 +264,8 @@ need_conf() {
 # (instalou/removeu algo), usando o mtime do diretório como gatilho.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/arnyx"
 CACHE_FILE="$CACHE_DIR/installed.cache"
-PACMAN_LOCAL_DB="/var/lib/pacman/local"
+# PKG_DB_PATH é definido pelo backend (arch.sh/gentoo.sh), concatenado
+# antes deste arquivo por tools/build-arn.sh.
 
 declare -A INSTALLED_SET=()
 declare -A INSTALLED_VER=()
@@ -219,14 +274,14 @@ declare -A EXPLICIT_SET=()
 _installed_cache_valid() {
     [[ -f "$CACHE_FILE" ]] || return 1
     local db_mtime cache_mtime
-    db_mtime=$(stat -c %Y "$PACMAN_LOCAL_DB" 2>/dev/null) || return 1
+    db_mtime=$(stat -c %Y "$PKG_DB_PATH" 2>/dev/null) || return 1
     cache_mtime=$(head -n1 "$CACHE_FILE" 2>/dev/null)
     [[ -n "$cache_mtime" && "$db_mtime" == "$cache_mtime" ]]
 }
 
 _write_installed_cache() {
     mkdir -p "$CACHE_DIR" 2>/dev/null
-    local db_mtime; db_mtime=$(stat -c %Y "$PACMAN_LOCAL_DB" 2>/dev/null) || return
+    local db_mtime; db_mtime=$(stat -c %Y "$PKG_DB_PATH" 2>/dev/null) || return
     {
         echo "$db_mtime"
         local name exp
@@ -252,28 +307,12 @@ _load_installed_set() {
         return
     fi
 
-    local name="" ver="" reason=""
-    while IFS= read -r line; do
-        case "$line" in
-            Name*)              name="${line#*: }" ;;
-            Version*)           ver="${line#*: }"  ;;
-            "Install Reason"*)  reason="${line#*: }" ;;
-            "")
-                if [[ -n "$name" ]]; then
-                    INSTALLED_SET["$name"]=1
-                    INSTALLED_VER["$name"]="$ver"
-                    [[ "$reason" == Explicitly* ]] && EXPLICIT_SET["$name"]=1
-                fi
-                name=""; ver=""; reason=""
-                ;;
-        esac
-    done < <(LC_ALL=C pacman -Qi)
-    # o último pacote da lista não tem linha em branco depois dele
-    if [[ -n "$name" ]]; then
-        INSTALLED_SET["$name"]=1
-        INSTALLED_VER["$name"]="$ver"
-        [[ "$reason" == Explicitly* ]] && EXPLICIT_SET["$name"]=1
-    fi
+    # backend_populate_installed (definido em backends/<distro>/*.sh) faz
+    # o parsing específico do gerenciador e preenche INSTALLED_SET,
+    # INSTALLED_VER e EXPLICIT_SET diretamente — o formato de "pacote
+    # instalado" difere demais entre pacman -Qi e qlist -Iv pra ter um
+    # parser genérico aqui.
+    backend_populate_installed
 
     _write_installed_cache
 }
@@ -372,7 +411,7 @@ _resolve_pkg_name() {
         command -v "$helper" >/dev/null 2>&1 || { err "'$helper' não encontrado. Instale o helper AUR antes de continuar."; return 1; }
         "$helper" -Si "$pkg" &>/dev/null && { echo "$pkg"; return 0; }
     else
-        pacman -Si "$pkg" &>/dev/null && { echo "$pkg"; return 0; }
+        primary_available "$pkg" && { echo "$pkg"; return 0; }
     fi
     return 1
 }
@@ -382,10 +421,10 @@ _search_similar_names() {
     if [[ "$manager" == "yay" ]]; then
         local helper; helper="$(aur_detect_helper)"
         command -v "$helper" >/dev/null 2>&1 || return 0
-        "$helper" -Ss "$pkg" 2>/dev/null
+        "$helper" -Ss "$pkg" 2>/dev/null | awk '/^[a-zA-Z0-9_.+-]+\// {print $1}' | cut -d/ -f2 | head -n 8
     else
-        pacman -Ss "$pkg" 2>/dev/null
-    fi | awk '/^[a-zA-Z0-9_.+-]+\// {print $1}' | cut -d/ -f2 | head -n 8
+        primary_search "$pkg" 2>/dev/null | cut -f2 | head -n 8
+    fi
 }
 
 # Usado pelo `manage` ao apertar A. Primeiro tenta confirmar que o
@@ -447,10 +486,10 @@ cmd_install() {
             continue
         fi
 
-        if pacman_available "$pkg"; then
+        if primary_available "$pkg"; then
             info "'$pkg' encontrado no repo oficial → pacman"
             cmd_add pacman "$pkg"
-        elif aur_available "$pkg"; then
+        elif secondary_available "$pkg"; then
             info "'$pkg' encontrado no AUR → yay"
             cmd_add yay "$pkg"
         else
@@ -475,7 +514,7 @@ cmd_search() {
 
     info "Buscando '$term' no repo oficial e no AUR..."
     local results
-    results="$( { pacman_search "$term"; aur_search "$term"; } )"
+    results="$( { primary_search "$term"; secondary_search "$term"; } )"
     [[ -n "$results" ]] || { warn "Nada encontrado pra '$term'."; return; }
 
     local lines=() manager name desc status
@@ -536,7 +575,7 @@ cmd_manage() {
     declare -A foreign_set=()
     while read -r pkg; do
         [[ -n "$pkg" ]] && foreign_set["$pkg"]=1
-    done < <(LC_ALL=C pacman -Qmq 2>/dev/null)
+    done < <(backend_foreign_list)
 
     # Por padrão só mostra o que precisa de decisão: pendente (declarado
     # mas não instalado) e manual (instalado mas não declarado). O que
@@ -629,9 +668,9 @@ cmd_remove() {
 
         if [[ -z "$found_in" ]]; then
             warn "'$pkg' não está no .conf"
-            if pacman -Q "$pkg" &>/dev/null; then
+            if pkg_installed_now "$pkg"; then
                 info "Pacote encontrado no sistema. Removendo..."
-                sudo pacman -Rns "$pkg" && ok "Removido: $pkg" || err "Falha ao remover: $pkg"
+                pkg_remove "$pkg" && ok "Removido: $pkg" || err "Falha ao remover: $pkg"
             else
                 err "'$pkg' não está instalado nem no .conf."
             fi
@@ -641,9 +680,9 @@ cmd_remove() {
         _remove_from_conf "$pkg"
         ok "Removido '$pkg' do .conf [$found_in]"
 
-        if pacman -Q "$pkg" &>/dev/null; then
+        if pkg_installed_now "$pkg"; then
             info "Desinstalando $pkg e dependências órfãs..."
-            sudo pacman -Rns "$pkg" && ok "Desinstalado: $pkg" || warn "Falha ao desinstalar. Remova manualmente."
+            pkg_remove "$pkg" && ok "Desinstalado: $pkg" || warn "Falha ao desinstalar. Remova manualmente."
         else
             info "'$pkg' já não estava instalado no sistema."
         fi
@@ -774,7 +813,7 @@ cmd_rebuild() {
             for pkg in "${to_remove[@]}"; do
                 if _is_installed "$pkg"; then
                     warn "Removendo (saiu do .conf): $pkg"
-                    sudo pacman -Rns --noconfirm "$pkg" 2>/dev/null && removed_any=1 || true
+                    pkg_remove_force "$pkg" 2>/dev/null && removed_any=1 || true
                 fi
             done
         else
@@ -794,21 +833,21 @@ cmd_upgrade() {
 
     case "$target" in
         pacman)
-            header "Upgrade — pacman (repositórios oficiais)"
-            info "Atualizando pacman..."
-            pacman_upgrade
+            header "Upgrade — repositório principal"
+            info "Atualizando..."
+            primary_upgrade
             ;;
         yay|aur)
-            header "Upgrade — AUR (yay)"
-            info "Atualizando AUR (yay)..."
-            aur_upgrade
+            header "Upgrade — fonte secundária (AUR/overlay)"
+            info "Atualizando fonte secundária..."
+            secondary_upgrade
             ;;
         all)
             header "Upgrade — atualizando todos os pacotes"
-            info "Atualizando pacman..."
-            pacman_upgrade
-            info "Atualizando AUR (yay)..."
-            aur_upgrade
+            info "Atualizando repositório principal..."
+            primary_upgrade
+            info "Atualizando fonte secundária..."
+            secondary_upgrade
             ;;
         *)
             die "Uso: upgrade [pacman|yay]"
@@ -897,7 +936,7 @@ cmd_why() {
     (( $# == 1 )) || die "Uso: why <pacote>"
     local pkg="$1"
 
-    pacman -Qi "$pkg" &>/dev/null || die "'$pkg' não está instalado."
+    pkg_installed_now "$pkg" || die "'$pkg' não está instalado."
 
     header "Why — $pkg"
 
@@ -910,21 +949,20 @@ cmd_why() {
     fi
 
     local reason
-    reason="$(LC_ALL=C pacman -Qi "$pkg" | awk -F': ' '/^Install Reason/{print $2; exit}')"
-    echo -e "\n${BOLD}Install Reason (pacman):${NC} $reason"
+    reason="$(pkg_install_reason "$pkg")"
+    echo -e "\n${BOLD}Install Reason:${NC} $reason"
 
     if [[ "$reason" == Explicitly* ]]; then
         info "Foi instalado diretamente — não é dependência de nada."
         return
     fi
 
-    if ! command -v pactree &>/dev/null; then
-        warn "pactree não encontrado (pacote pacman-contrib). Instale pra ver quem depende dele: arn install pacman-contrib"
+    local rev_deps
+    rev_deps="$(pkg_reverse_deps "$pkg" 2>/dev/null)"
+    if [[ -z "$rev_deps" ]] && ! command -v pactree &>/dev/null && ! command -v qdepends &>/dev/null; then
+        warn "$(pkg_reverse_deps_tool_hint)"
         return
     fi
-
-    local rev_deps
-    rev_deps="$(pactree -r "$pkg" 2>/dev/null | tail -n +2)"
     echo -e "\n${BOLD}Quem depende de '$pkg' (árvore reversa):${NC}"
     if [[ -n "$rev_deps" ]]; then
         echo "$rev_deps" | sed 's/^/  /'
@@ -933,6 +971,14 @@ cmd_why() {
         warn "Dependência sem nada usando — candidato a órfão. 'arn rebuild' já limpa isso se ele saiu do .conf."
     fi
     echo
+}
+
+cmd_unmask() {
+    (( $# )) || die "Uso: unmask <pacote> [pacote2 ...]"
+    local pkg
+    for pkg in "$@"; do
+        pkg_unmask "$pkg"
+    done
 }
 
 cmd_edit() {
@@ -1265,6 +1311,7 @@ ${BOLD}COMANDOS${NC}
   diff                    Mostra divergências entre .conf, lock e sistema
   why <pkg>               Por que está instalado: declarado por você ou dependência de quê
   edit                    Abre o .conf no \$EDITOR
+  unmask <pkg> [pkg2...]  [Gentoo] Desmascara pacote(s) específico(s) e registra o motivo (não tem alias na tabela comum — veja aliases/fish/gentoo.fish)
   rollback                Menu fzf com as gerações salvas (snapshots de sync/rebuild)
   rollback <N>            Restaura o .conf da geração N direto
   aliases install         Instala os aliases automaticamente (fish, via conf.d)
@@ -1311,6 +1358,7 @@ case "${1:-help}" in
     diff)    cmd_diff ;;
     why)     shift; cmd_why "$@" ;;
     edit)    cmd_edit ;;
+    unmask)  shift; cmd_unmask "$@" ;;
     rollback) shift; cmd_rollback "$@" ;;
     aliases) shift; cmd_aliases "$@" ;;
     help|-h|--help) usage ;;
