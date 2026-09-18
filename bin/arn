@@ -1477,7 +1477,7 @@ _check_aliases_nag() {
 
 usage() {
 cat << EOF
-${BOLD}arn${NC} — Arnyx, gerenciador declarativo de pacotes para CachyOS
+${BOLD}arn${NC} — Arnyx, gerenciador declarativo de pacotes (Arch / Gentoo)
 
 ${BOLD}COMANDOS${NC}
   init                    Cria o arquivo packages.conf inicial
