@@ -201,38 +201,100 @@ pkg_unmask() {
     if (( unmask_status == 0 )) || grep -q "Autounmask changes successfully written" <<< "$unmask_out"; then
         ok "'$pkg' desmascarado (alterações pendentes pra aplicar)."
 
-        # Aplica cada ._cfg* novo, mostrando o diff e pedindo [s/N] por
-        # arquivo — só mexe no que o próprio emerge criou agora.
+        # Aplica cada ._cfg* novo, mas em vez de mesclar de volta no
+        # arquivo que o Portage escolheu (que pode ser um só pra tudo),
+        # extrai as linhas adicionadas e escreve cada átomo no arquivo
+        # com o nome do próprio pacote. Assim /etc/portage/package.*
+        # fica organizado por pacote sem precisar rodar etc-update.
         local applied_files=() skipped_files=()
         if (( ${#cfg_files[@]} > 0 )); then
-            echo
-            info "O Portage gravou ${#cfg_files[@]} arquivo(s) pendente(s) em /etc/portage:"
             local cfg dir base orig
             for cfg in "${cfg_files[@]}"; do
                 dir="$(dirname "$cfg")"
                 base="$(basename "$cfg")"
                 orig="$dir/${base#._cfg????_}"
 
-                echo
-                echo -e "${BOLD}Pendente:${NC} $orig"
-                if [[ -f "$orig" ]]; then
-                    diff -u "$orig" "$cfg" 2>/dev/null \
-                        | tail -n +3 \
-                        | sed -e "s/^-/  ${RED}-${NC} /" -e "s/^+/  ${GREEN}+${NC} /"
-                else
-                    echo "  ${GREEN}(arquivo novo — não existia antes)${NC}"
-                    sed "s/^/  ${GREEN}+${NC} /" "$cfg"
-                fi
+                local py_helper; py_helper="$(mktemp)"
+                cat > "$py_helper" << 'PYEXTRACT'
+import difflib, re, sys
+from pathlib import Path
 
+orig_path = Path(sys.argv[1])
+cfg_path = Path(sys.argv[2])
+
+orig = orig_path.read_text().splitlines() if orig_path.exists() else []
+cfg = cfg_path.read_text().splitlines()
+
+added = []
+for line in difflib.unified_diff(orig, cfg, n=0, lineterm=''):
+    if line.startswith('+') and not line.startswith('+++'):
+        added.append(line[1:])
+
+def extract_pkg(atom_line):
+    token = atom_line.strip().split()[0] if atom_line.strip() else ''
+    m = re.match(r'^[=<>~]?\s*[a-zA-Z0-9+_.-]+/([a-zA-Z0-9+_.-]+?)(?:-[0-9].*)?$', token)
+    return m.group(1) if m else None
+
+chunks, current = [], []
+for line in added:
+    s = line.strip()
+    if not s:
+        continue
+    if s.startswith('#'):
+        current.append(line)
+    else:
+        current.append(line)
+        chunks.append(current)
+        current = []
+if current:
+    chunks.append(current)
+
+if not chunks:
+    print("  (nenhuma linha nova — ._cfg* idêntico ao original)")
+    sys.exit(0)
+
+dir_ = orig_path.parent
+wrote = []
+for chunk in chunks:
+    atom = next((l for l in chunk if l.strip() and not l.strip().startswith('#')), None)
+    if not atom:
+        continue
+    pkg = extract_pkg(atom)
+    if not pkg:
+        continue
+    target = dir_ / pkg
+    existing = target.read_text().splitlines() if target.exists() else []
+    to_write = [l for l in chunk if l not in existing]
+    if to_write:
+        with target.open('a') as f:
+            for l in to_write:
+                f.write(l + '\n')
+        wrote.append((str(target), to_write))
+
+if not wrote:
+    print("  (nada novo pra gravar)")
+    sys.exit(0)
+
+print(f"Vai gravar em {dir_}:")
+for path, lines in wrote:
+    print(f"  {Path(path).name}")
+    for l in lines:
+        if not l.strip().startswith('#'):
+            print(f"    + {l.strip()}")
+PYEXTRACT
+                sudo python3 "$py_helper" "$orig" "$cfg"
+                rm -f "$py_helper"
+
+                echo
                 local apply_reply
-                read -r -p "$(echo -e "  ${YELLOW}?${NC} Aplicar essa alteração em $orig? [s/N] ")" apply_reply
+                read -r -p "$(echo -e "${YELLOW}?${NC} Confirmar? [s/N] ")" apply_reply
                 if [[ "$apply_reply" =~ ^[sS]$ ]]; then
-                    sudo cp "$cfg" "$orig" && sudo rm -f "$cfg"
-                    applied_files+=("$orig")
-                    ok "  Aplicado."
+                    sudo rm -f "$cfg"
+                    applied_files+=("$orig (extraído por pacote)")
+                    ok "Aplicado."
                 else
                     skipped_files+=("$orig")
-                    info "  Pulado — o arquivo $cfg continua pendente."
+                    info "Cancelado — nada foi alterado."
                 fi
             done
         fi

@@ -36,6 +36,21 @@ need_conf() {
     [[ -f "$CONF" ]] || die "Arquivo de configuração não encontrado: $CONF\n   Rode: arn init"
 }
 
+# Aviso passivo: se existirem ._cfg* pendentes em /etc/portage (Gentoo),
+# avisa o usuário no fim dos comandos principais. No Arch nunca dispara
+# (não tem /etc/portage). São propostas de alteração que o Portage
+# gravou e ainda não foram aplicadas — o usuário decide quando/quais
+# revisar (etc-update ou dispatch-conf).
+_check_pending_cfg() {
+    [[ -d /etc/portage ]] || return 0
+    local n
+    n="$(find /etc/portage -type f -name '._cfg*' 2>/dev/null | wc -l)"
+    (( n > 0 )) || return 0
+    echo
+    warn "Existem $n arquivo(s) pendente(s) em /etc/portage pra revisar."
+    info "Rode: sudo etc-update   (ou: sudo dispatch-conf)"
+}
+
 # Toda invocação do pacman -Q* recarrega o banco local inteiro (é
 # assim que o libalpm funciona por baixo, independe das flags usadas)
 # — caro em HDD. Guardamos o resultado em disco e só refazemos a
@@ -275,6 +290,8 @@ cmd_install() {
             err "'$pkg' não encontrado nem no repo oficial nem no AUR."
         fi
     done
+
+    _check_pending_cfg
 }
 
 # _search_repo/_search_aur agora são pacman_search/aur_search, vindas
@@ -507,6 +524,7 @@ cmd_sync() {
 
     _write_lock_from_conf
     _snapshot_generation "sync"
+    _check_pending_cfg
 }
 
 # Sincronização completa: instala novos + remove o que saiu do .conf.
@@ -605,6 +623,7 @@ cmd_rebuild() {
     _write_lock_from_conf
     _snapshot_generation "rebuild"
     (( removed_any || (${#to_remove[@]} == 0) )) && ok "Rebuild concluído!" || warn "Rebuild concluído (remoção pulada)."
+    _check_pending_cfg
 }
 
 cmd_upgrade() {
@@ -635,6 +654,7 @@ cmd_upgrade() {
 
     _write_lock_from_conf
     ok "Upgrade concluído!"
+    _check_pending_cfg
 }
 
 cmd_list() {
@@ -758,6 +778,7 @@ cmd_unmask() {
     for pkg in "$@"; do
         pkg_unmask "$pkg"
     done
+    _check_pending_cfg
 }
 
 cmd_edit() {
