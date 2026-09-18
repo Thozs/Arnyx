@@ -10,7 +10,7 @@
 # a overlays no futuro).
 #
 # Pré-requisito no sistema: app-portage/portage-utils (dá o `qlist` e
-# o `qdepends` usados abaixo) — equivalente ao pacman-contrib no Arch.
+# o `qdepends` usados abaixo) — equivalente ao portage-contrib no Arch.
 #   sudo emerge --ask=n app-portage/portage-utils
 
 GENTOO_SOURCES=(portage)
@@ -21,11 +21,22 @@ backend_check_available() { command -v emerge >/dev/null 2>&1; }
 backend_unavailable_msg() { echo "Isso não é um sistema Gentoo (emerge não encontrado)."; }
 
 _install_pkg() {
-    local manager="$1" pkg="$2"
-    if [[ "$manager" == "pacman" ]]; then
-        portage_install "$pkg" && return 0
+    local manager="$1" pkg="$2" rc
+    if [[ "$manager" == "portage" ]]; then
+        portage_install "$pkg"
+        rc=$?
+        (( rc == 0 )) && return 0
+        if (( rc == 2 )); then
+            warn "'$pkg' está mascarado no Portage — não é 'não encontrado', só falta desmascarar."
+            info "Rode: arn unmask $pkg"
+            return 1
+        fi
+        if (( rc == 3 )); then
+            warn "Build de '$pkg' interrompido (Ctrl+C) — mantido no .conf."
+            return 1
+        fi
     else
-        warn "Seção '[$manager]' não é suportada no backend Gentoo (só existe [pacman], que aqui significa Portage). Pulando '$pkg'."
+        warn "Seção '[$manager]' não é suportada no backend Gentoo. Pulando '$pkg'."
         return 1
     fi
 
@@ -40,7 +51,7 @@ _install_batch() {
     local pkgs=("$@")
     (( ${#pkgs[@]} )) || return 0
 
-    if [[ "$manager" == "pacman" ]]; then
+    if [[ "$manager" == "portage" ]]; then
         portage_install_batch "${pkgs[@]}" && return 0
     else
         warn "Seção '[$manager]' não é suportada no backend Gentoo. Pulando: ${pkgs[*]}"
@@ -69,7 +80,7 @@ backend_foreign_list() { :; }  # sem conceito de "estrangeiro" (AUR) no Gentoo
 # Preenche INSTALLED_SET/INSTALLED_VER/EXPLICIT_SET a partir do
 # `qlist -Iv` (formato "categoria/nome-versão", uma linha por pacote)
 # cruzado com /var/lib/portage/world pra saber o que foi instalado
-# explicitamente (equivalente ao Install Reason do pacman).
+# explicitamente (equivalente ao Install Reason do portage).
 backend_populate_installed() {
     command -v qlist >/dev/null 2>&1 || { warn "qlist não encontrado (pacote app-portage/portage-utils). Instale: sudo emerge --ask=n app-portage/portage-utils"; return; }
 
@@ -138,6 +149,14 @@ UNMASK_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/arnyx/gentoo-unmasked.log"
 
 pkg_unmask() {
     local pkg="$1"
+
+    # Nome de pacote seguro (categoria/nome ou só nome) — evita que
+    # uma string maliciosa vire path no sudo cp mais abaixo.
+    if [[ ! "$pkg" =~ ^[a-zA-Z0-9][a-zA-Z0-9+_.-]*(/[a-zA-Z0-9][a-zA-Z0-9+_.-]*)?$ ]]; then
+        err "Nome de pacote inválido: '$pkg'"
+        return 1
+    fi
+
     header "Unmask — $pkg"
 
     if emerge --pretend "$pkg" &>/dev/null; then
@@ -162,17 +181,83 @@ pkg_unmask() {
     read -r -p "$(echo -e "${YELLOW}?${NC} Desmascarar '$pkg'? Isso grava em /etc/portage/package.* (só esse pacote). [s/N] ")" reply
     [[ "$reply" =~ ^[sS]$ ]] || { info "Cancelado — '$pkg' continua mascarado."; return 0; }
 
-    if sudo emerge --ask=n --autounmask=y --autounmask-write "$pkg"; then
-        ok "'$pkg' desmascarado."
+    # Snapshot dos ._cfg* já existentes, pra detectar só os que o
+    # emerge criar AGORA (e não mexer em pendências antigas do usuário
+    # que nada têm a ver com esse pacote).
+    local before_list after_list
+    before_list="$(mktemp)"; after_list="$(mktemp)"
+    find /etc/portage -type f -name '._cfg????_*' 2>/dev/null | sort > "$before_list"
+
+    local unmask_out
+    unmask_out="$(sudo emerge --ask=n --autounmask=y --autounmask-write "$pkg" 2>&1)"
+    local unmask_status=$?
+    echo "$unmask_out"
+
+    find /etc/portage -type f -name '._cfg????_*' 2>/dev/null | sort > "$after_list"
+    local cfg_files=()
+    mapfile -t cfg_files < <(comm -13 "$before_list" "$after_list")
+    rm -f "$before_list" "$after_list"
+
+    # --autounmask-write sai com status != 0 DE PROPÓSITO mesmo quando
+    # grava certo (é assim que o Portage força revisar antes de aplicar
+    # de verdade) — por isso não dá pra confiar só no exit code aqui.
+    if (( unmask_status == 0 )) || grep -q "Autounmask changes successfully written" <<< "$unmask_out"; then
+        ok "'$pkg' desmascarado (alterações pendentes pra aplicar)."
+
+        # Aplica cada ._cfg* novo, mostrando o diff e pedindo [s/N] por
+        # arquivo — só mexe no que o próprio emerge criou agora.
+        local applied_files=() skipped_files=()
+        if (( ${#cfg_files[@]} > 0 )); then
+            echo
+            info "O Portage gravou ${#cfg_files[@]} arquivo(s) pendente(s) em /etc/portage:"
+            local cfg dir base orig
+            for cfg in "${cfg_files[@]}"; do
+                dir="$(dirname "$cfg")"
+                base="$(basename "$cfg")"
+                orig="$dir/${base#._cfg????_}"
+
+                echo
+                echo -e "${BOLD}Pendente:${NC} $orig"
+                if [[ -f "$orig" ]]; then
+                    diff -u "$orig" "$cfg" 2>/dev/null \
+                        | tail -n +3 \
+                        | sed -e "s/^-/  ${RED}-${NC} /" -e "s/^+/  ${GREEN}+${NC} /"
+                else
+                    echo "  ${GREEN}(arquivo novo — não existia antes)${NC}"
+                    sed "s/^/  ${GREEN}+${NC} /" "$cfg"
+                fi
+
+                local apply_reply
+                read -r -p "$(echo -e "  ${YELLOW}?${NC} Aplicar essa alteração em $orig? [s/N] ")" apply_reply
+                if [[ "$apply_reply" =~ ^[sS]$ ]]; then
+                    sudo cp "$cfg" "$orig" && sudo rm -f "$cfg"
+                    applied_files+=("$orig")
+                    ok "  Aplicado."
+                else
+                    skipped_files+=("$orig")
+                    info "  Pulado — o arquivo $cfg continua pendente."
+                fi
+            done
+        fi
+
+        # Log: motivo + arquivos efetivamente tocados
         mkdir -p "$(dirname "$UNMASK_LOG")"
         {
-            printf '%s | %s | %s\n' \
+            printf '%s | %s | %s' \
                 "$(date '+%Y-%m-%d %H:%M:%S')" \
                 "$pkg" \
                 "$(echo "$reason" | tr '\n' ' ' | sed 's/  */ /g')"
+            if (( ${#applied_files[@]} > 0 )); then
+                printf ' | arquivos: %s' "$(printf '%s ' "${applied_files[@]}")"
+            fi
+            printf '\n'
         } >> "$UNMASK_LOG"
         info "Registrado em: $UNMASK_LOG"
-        warn "Se o emerge avisou sobre arquivos em /etc/portage pra revisar, rode: sudo etc-update (ou dispatch-conf)"
+
+        if (( ${#skipped_files[@]} > 0 )); then
+            warn "${#skipped_files[@]} arquivo(s) ficaram pendentes — rode 'sudo etc-update' (ou dispatch-conf) pra resolvê-los."
+        fi
+
         info "Depois: arn install $pkg"
     else
         err "Falha ao desmascarar '$pkg'. Nada foi registrado no log."
@@ -182,31 +267,62 @@ pkg_unmask() {
 
 # backends/gentoo/sources/portage.sh — árvore principal do Gentoo (Portage).
 #
+# Usa `qsearch` (app-portage/portage-utils, já exigido pro qlist/qdepends)
+# em vez de `emerge -s`: o qsearch é bem mais rápido e devolve uma linha
+# por pacote ("categoria/nome: descrição"), enquanto o emerge -s tem
+# formato multi-linha pensado pra humano (frágil de parsear) e em
+# algumas versões nem mostra pacotes mascarados por keyword na busca —
+# então "não encontrado" e "mascarado" ficavam indistinguíveis.
+#
 # Upgrade padrão: emerge --sync + emerge -avuDN @world. Não tenta
 # detectar mudanças de CFLAGS/CHOST (o Portage também não detecta
 # isso sozinho) — só USE flags, via --newuse, que é rastreado por
 # pacote de verdade. Rebuild completo (emerge -e @world) fica de fora
 # do escopo por enquanto: se precisar, rode manualmente.
 
+# Remove sequências de cor ANSI, caso o qsearch as emita mesmo sem tty.
+_portage_strip_color() { sed 's/\x1b\[[0-9;]*m//g'; }
+
 portage_available() {
-    emerge -s "^$1\$" 2>/dev/null | grep -q '^\*'
+    local pkg="$1"
+    command -v qsearch >/dev/null 2>&1 || { warn "qsearch não encontrado (pacote app-portage/portage-utils)."; return 1; }
+    qsearch "$pkg" 2>/dev/null | _portage_strip_color | awk -F': ' -v p="$pkg" '
+        NF>=2 { n=$1; sub(/.*\//, "", n); if (n == p) { found=1; exit } }
+        END { exit !found }
+    '
 }
 
 portage_search() {
     local term="$1"
-    emerge -s "$term" 2>/dev/null | awk -v mgr="pacman" '
-        /^\*/ {
-            name = $2
-            desc = ""
-            getline d
-            if (d ~ /^ {2,}/) { sub(/^[ \t]+/, "", d); desc = d }
-            printf "%s\t%s\t%s\n", mgr, name, desc
+    command -v qsearch >/dev/null 2>&1 || return 0
+    qsearch "$term" 2>/dev/null | _portage_strip_color | awk -F': ' -v mgr="portage" '
+        NF>=2 {
+            n=$1; sub(/.*\//, "", n)
+            desc=$0; sub(/^[^:]*: /, "", desc)
+            printf "%s\t%s\t%s\n", mgr, n, desc
         }
     '
 }
 
 portage_install() {
-    sudo emerge --ask=n "$1"
+    local pkg="$1"
+    local log; log="$(mktemp)"
+
+    # tee pra tela E pra arquivo: output streaming ao vivo (compilação
+    # visível conforme acontece), e ainda dá pra grepar "have been
+    # masked" no fim sem depender só do exit code.
+    sudo emerge --ask=n "$pkg" 2>&1 | tee "$log"
+    local status="${PIPESTATUS[0]}"
+
+    local masked=0
+    if (( status != 0 )) && grep -q "have been masked" "$log"; then
+        masked=1
+    fi
+    rm -f "$log"
+
+    (( masked )) && return 2
+    (( status == 130 )) && return 3   # SIGINT (Ctrl+C) — não é falha real
+    return "$status"
 }
 
 portage_install_batch() {
@@ -224,7 +340,7 @@ portage_upgrade() {
 #  src/core.sh — núcleo do arn (editado à mão)
 #
 #  Este arquivo NÃO é o binário final. tools/build-arn.sh concatena
-#  backends/arch/arch.sh + backends/arch/sources/{pacman,aur}.sh +
+#  backends/arch/arch.sh + backends/arch/sources/{portage,aur}.sh +
 #  este arquivo, nessa ordem, e gera bin/arn (commitado, é o que o
 #  bootstrap.sh de fato instala). Editar aqui, rodar
 #  ./tools/build-arn.sh, testar via ./bin/arn.
@@ -257,10 +373,10 @@ need_conf() {
     [[ -f "$CONF" ]] || die "Arquivo de configuração não encontrado: $CONF\n   Rode: arn init"
 }
 
-# Toda invocação do pacman -Q* recarrega o banco local inteiro (é
+# Toda invocação do portage -Q* recarrega o banco local inteiro (é
 # assim que o libalpm funciona por baixo, independe das flags usadas)
 # — caro em HDD. Guardamos o resultado em disco e só refazemos a
-# varredura se o banco local do pacman mudou desde a última vez
+# varredura se o banco local do portage mudou desde a última vez
 # (instalou/removeu algo), usando o mtime do diretório como gatilho.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/arnyx"
 CACHE_FILE="$CACHE_DIR/installed.cache"
@@ -310,7 +426,7 @@ _load_installed_set() {
     # backend_populate_installed (definido em backends/<distro>/*.sh) faz
     # o parsing específico do gerenciador e preenche INSTALLED_SET,
     # INSTALLED_VER e EXPLICIT_SET diretamente — o formato de "pacote
-    # instalado" difere demais entre pacman -Qi e qlist -Iv pra ter um
+    # instalado" difere demais entre portage -Qi e qlist -Iv pra ter um
     # parser genérico aqui.
     backend_populate_installed
 
@@ -367,13 +483,11 @@ cmd_init() {
 # Regras:
 #   • Um pacote por linha
 #   • Linhas com # são comentários
-#   • Seção [pacman] → instalado com pacman
-#   • Seção [yay]    → instalado com yay (AUR)
+#   • Seção [portage] → instalado com portage
 # ─────────────────────────────────────────────────────────────
 
-[pacman]
+[portage]
 
-[yay]
 EOF
 
     ok "Configuração criada em: $CONF"
@@ -383,8 +497,8 @@ EOF
 
 cmd_add() {
     local manager="${1:-}"; shift || true
-    [[ "$manager" == "pacman" || "$manager" == "yay" ]] \
-        || die "Uso: add <pacman|yay> <pacote> [pacote2 ...]"
+    [[ "$manager" == "portage" ]] \
+        || die "Uso: add <portage> <pacote> [pacote2 ...]"
     (( $# )) || die "Informe ao menos um pacote."
     need_conf
 
@@ -428,8 +542,8 @@ _search_similar_names() {
 }
 
 # Usado pelo `manage` ao apertar A. Primeiro tenta confirmar que o
-# nome ainda existe no repo/AUR (pacman -Si/yay -Si); se não existir
-# mais (renomeado, órfão, ou instalado manualmente via pacman -U),
+# nome ainda existe no repo/AUR (portage -Si/yay -Si); se não existir
+# mais (renomeado, órfão, ou instalado manualmente via portage -U),
 # busca nomes parecidos e deixa você escolher o certo, ou manter o
 # original marcado como "não verificado", ou pular a adoção.
 _adopt_pkg() {
@@ -447,7 +561,7 @@ _adopt_pkg() {
         return
     fi
 
-    warn "'$pkg' não encontrado com esse nome exato no repo/AUR. Buscando parecidos..."
+    warn "'$pkg' não encontrado com esse nome exato no repo oficial. Buscando parecidos..."
     local candidates=()
     mapfile -t candidates < <(_search_similar_names "$manager" "$pkg")
 
@@ -459,13 +573,13 @@ _adopt_pkg() {
     options+=("[pular — não adotar]")
 
     local chosen
-    chosen=$(printf '%s\n' "${options[@]}" | fzf --header "Nome real pra '$pkg'? (repo/AUR pode ter renomeado)")
+    chosen=$(printf '%s\n' "${options[@]}" | fzf --header "Nome real pra '$pkg'? (o repo pode ter renomeado)")
     [[ -z "$chosen" || "$chosen" == "[pular"* ]] && { warn "Adoção de '$pkg' pulada."; return; }
 
     local final_name="${chosen%% *}"
 
     if [[ "$final_name" == "$pkg" ]]; then
-        _add_to_conf "$manager" "$pkg" "não verificado no repo/AUR ao adotar"
+        _add_to_conf "$manager" "$pkg" "não verificado no repo oficial ao adotar"
         ok "Adotado '$pkg' na seção [$manager] (marcado como não verificado)"
     else
         _add_to_conf "$manager" "$final_name"
@@ -481,29 +595,29 @@ cmd_install() {
     need_conf
 
     for pkg in "$@"; do
-        if get_section "pacman" | grep -qx "$pkg" || get_section "yay" | grep -qx "$pkg"; then
+        if get_section "portage" | grep -qx "$pkg" || get_section "yay" | grep -qx "$pkg"; then
             warn "'$pkg' já está no .conf"
             continue
         fi
 
         if primary_available "$pkg"; then
-            info "'$pkg' encontrado no repo oficial → pacman"
-            cmd_add pacman "$pkg"
+            info "'$pkg' encontrado no repo oficial → portage"
+            cmd_add portage "$pkg"
         elif secondary_available "$pkg"; then
             info "'$pkg' encontrado no AUR → yay"
             cmd_add yay "$pkg"
         else
-            err "'$pkg' não encontrado nem no repo oficial nem no AUR."
+            err "'$pkg' não encontrado no repo oficial."
         fi
     done
 }
 
 # _search_repo/_search_aur agora são pacman_search/aur_search, vindas
-# de backends/arch/sources/{pacman,aur}.sh.
+# de backends/arch/sources/{portage,aur}.sh.
 
 # Busca unificada repo oficial + AUR num menu fzf só. TAB/espaço marca
 # vários, Enter instala os marcados delegando pro 'cmd_install' (que já
-# resolve pacman vs AUR sozinho por pacote) — fecha o ciclo
+# resolve portage vs AUR sozinho por pacote) — fecha o ciclo
 # descobrir → declarar num comando só.
 cmd_search() {
     (( $# )) || die "Uso: search <termo>"
@@ -512,7 +626,7 @@ cmd_search() {
 
     _load_installed_set
 
-    info "Buscando '$term' no repo oficial e no AUR..."
+    info "Buscando '$term' no repo oficial..."
     local results
     results="$( { primary_search "$term"; secondary_search "$term"; } )"
     [[ -n "$results" ]] || { warn "Nada encontrado pra '$term'."; return; }
@@ -559,12 +673,12 @@ cmd_manage() {
     _load_installed_set
 
     local pac_declared=() yay_declared=()
-    mapfile -t pac_declared < <(get_section "pacman") || true
+    mapfile -t pac_declared < <(get_section "portage") || true
     mapfile -t yay_declared < <(get_section "yay")    || true
 
     declare -A declared_set=() declared_manager=()
     for p in "${pac_declared[@]:-}"; do
-        [[ -n "$p" ]] && { declared_set["$p"]=1; declared_manager["$p"]="pacman"; }
+        [[ -n "$p" ]] && { declared_set["$p"]=1; declared_manager["$p"]="portage"; }
     done
     for p in "${yay_declared[@]:-}"; do
         [[ -n "$p" ]] && { declared_set["$p"]=1; declared_manager["$p"]="yay"; }
@@ -592,7 +706,7 @@ cmd_manage() {
     done
     for pkg in "${!EXPLICIT_SET[@]}"; do
         [[ -n "${declared_set[$pkg]:-}" ]] && continue
-        local src="pacman"
+        local src="portage"
         [[ -n "${foreign_set[$pkg]:-}" ]] && src="yay"
         lines+=("$(printf '%-11s %-7s %s' 'manual' "$src" "$pkg")")
     done
@@ -663,7 +777,7 @@ cmd_remove() {
 
     for pkg in "$@"; do
         local found_in=""
-        get_section "pacman" | grep -qx "$pkg" && found_in="pacman"
+        get_section "portage" | grep -qx "$pkg" && found_in="portage"
         get_section "yay"    | grep -qx "$pkg" && found_in="yay"
 
         if [[ -z "$found_in" ]]; then
@@ -699,7 +813,7 @@ cmd_sync() {
     _load_installed_set
 
     local pac_declared=() yay_declared=()
-    mapfile -t pac_declared < <(get_section "pacman") || true
+    mapfile -t pac_declared < <(get_section "portage") || true
     mapfile -t yay_declared < <(get_section "yay")    || true
 
     local pac_missing=() yay_missing=()
@@ -716,8 +830,8 @@ cmd_sync() {
         ok "Tudo já está instalado."
     else
         if (( ${#pac_missing[@]} )); then
-            info "Instalando via pacman: ${pac_missing[*]}"
-            _install_batch "pacman" "${pac_missing[@]}"
+            info "Instalando via portage: ${pac_missing[*]}"
+            _install_batch "portage" "${pac_missing[@]}"
         fi
         if (( ${#yay_missing[@]} )); then
             info "Instalando via yay: ${yay_missing[*]}"
@@ -742,12 +856,12 @@ cmd_rebuild() {
     _load_installed_set
 
     local pac_declared=() yay_declared=()
-    mapfile -t pac_declared < <(get_section "pacman") || true
+    mapfile -t pac_declared < <(get_section "portage") || true
     mapfile -t yay_declared < <(get_section "yay")    || true
 
     local pac_installed=() yay_installed=()
     if [[ -f "$LOCK" ]]; then
-        mapfile -t pac_installed < <(awk '/^\[pacman\]/{f=1;next}/^\[/{f=0}f&&/\S/{print $1}' "$LOCK") || true
+        mapfile -t pac_installed < <(awk '/^\[portage\]/{f=1;next}/^\[/{f=0}f&&/\S/{print $1}' "$LOCK") || true
         mapfile -t yay_installed < <(awk '/^\[yay\]/{f=1;next}/^\[/{f=0}f&&/\S/{print $1}' "$LOCK")    || true
     fi
 
@@ -799,7 +913,7 @@ cmd_rebuild() {
         return
     fi
 
-    (( ${#pac_missing[@]} )) && _install_batch "pacman" "${pac_missing[@]}"
+    (( ${#pac_missing[@]} )) && _install_batch "portage" "${pac_missing[@]}"
     (( ${#yay_missing[@]} )) && _install_batch "yay" "${yay_missing[@]}"
 
     # Recarrega o cache pra refletir o que acabou de ser instalado
@@ -832,7 +946,7 @@ cmd_upgrade() {
     local target="${1:-all}"
 
     case "$target" in
-        pacman)
+        portage|portage)
             header "Upgrade — repositório principal"
             info "Atualizando..."
             primary_upgrade
@@ -850,7 +964,7 @@ cmd_upgrade() {
             secondary_upgrade
             ;;
         *)
-            die "Uso: upgrade [pacman|yay]"
+            die "Uso: upgrade [portage]"
             ;;
     esac
 
@@ -863,9 +977,9 @@ cmd_list() {
     header "Pacotes declarados em $CONF"
     _load_installed_set
 
-    echo -e "\n${BOLD}[pacman]${NC}"
+    echo -e "\n${BOLD}[portage]${NC}"
     local pac=()
-    mapfile -t pac < <(get_section "pacman") || true
+    mapfile -t pac < <(get_section "portage") || true
     for pkg in "${pac[@]:-}"; do
         [[ -z "$pkg" ]] && continue
         if _is_installed "$pkg"; then
@@ -875,17 +989,6 @@ cmd_list() {
         fi
     done
 
-    echo -e "\n${BOLD}[yay / AUR]${NC}"
-    local aur=()
-    mapfile -t aur < <(get_section "yay") || true
-    for pkg in "${aur[@]:-}"; do
-        [[ -z "$pkg" ]] && continue
-        if _is_installed "$pkg"; then
-            echo -e "  ${GREEN}✓${NC} $pkg ${CYAN}(${INSTALLED_VER[$pkg]})${NC}"
-        else
-            echo -e "  ${YELLOW}○${NC} $pkg ${YELLOW}(não instalado)${NC}"
-        fi
-    done
     echo
 }
 
@@ -895,7 +998,7 @@ cmd_diff() {
     _load_installed_set
 
     local all_declared=()
-    mapfile -t all_declared < <({ get_section "pacman"; get_section "yay"; }) || true
+    mapfile -t all_declared < <({ get_section "portage"; get_section "yay"; }) || true
 
     declare -A declared_set=()
     for d in "${all_declared[@]:-}"; do
@@ -940,8 +1043,8 @@ cmd_why() {
 
     header "Why — $pkg"
 
-    if get_section "pacman" | grep -qx "$pkg"; then
-        ok "Declarado no .conf, seção [pacman] — você escolheu instalar."
+    if get_section "portage" | grep -qx "$pkg"; then
+        ok "Declarado no .conf, seção [portage] — você escolheu instalar."
     elif get_section "yay" | grep -qx "$pkg"; then
         ok "Declarado no .conf, seção [yay] — você escolheu instalar."
     else
@@ -988,10 +1091,10 @@ cmd_edit() {
 }
 
 _write_lock_from_conf() {
-    local pac=(); mapfile -t pac < <(get_section "pacman") || true
+    local pac=(); mapfile -t pac < <(get_section "portage") || true
     local aur=(); mapfile -t aur < <(get_section "yay")    || true
     {
-        echo "[pacman]"
+        echo "[portage]"
         printf '%s\n' "${pac[@]:-}"
         echo ""
         echo "[yay]"
@@ -1002,7 +1105,7 @@ _write_lock_from_conf() {
 # ── Generations (rollback) ──────────────────────────────────────
 # Cada sync/rebuild bem-sucedido salva uma "geração": uma cópia do
 # .conf daquele momento, mais um log (informativo) das versões que
-# estavam instaladas na hora. O pacman não reinstala versão antiga
+# estavam instaladas na hora. O portage não reinstala versão antiga
 # sozinho, então "rollback" aqui restaura o CONJUNTO de pacotes
 # declarado — não trava versão. O log de versão é só referência.
 GEN_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/arnyx/generations"
@@ -1061,7 +1164,7 @@ _snapshot_generation() {
     } > "${base}.meta"
 
     local pac_declared=() yay_declared=()
-    mapfile -t pac_declared < <(get_section "pacman") || true
+    mapfile -t pac_declared < <(get_section "portage") || true
     mapfile -t yay_declared < <(get_section "yay")    || true
     {
         for pkg in "${pac_declared[@]:-}" "${yay_declared[@]:-}"; do
@@ -1127,7 +1230,7 @@ cmd_rollback() {
     fi
 
     echo
-    warn "Isso restaura a LISTA de pacotes, não a versão exata (pacman não faz downgrade sozinho)."
+    warn "Isso restaura a LISTA de pacotes, não a versão exata (portage não faz downgrade sozinho)."
     local reply
     read -r -p "$(echo -e "${YELLOW}?${NC} Restaurar .conf da geração $target? [s/N] ")" reply
     [[ "$reply" =~ ^[sS]$ ]] || { info "Cancelado."; return; }
@@ -1295,18 +1398,17 @@ ${BOLD}arn${NC} — Arnyx, gerenciador declarativo de pacotes para CachyOS
 
 ${BOLD}COMANDOS${NC}
   init                    Cria o arquivo packages.conf inicial
-  install <pkg>           Detecta pacman/AUR sozinho, adiciona e instala
-  search <termo>          Busca no repo oficial + AUR, menu fzf pra instalar direto
+  install <pkg>           Detecta portage sozinho, adiciona e instala
+  search <termo>          Busca no repo oficial, menu fzf pra instalar direto
   manage                  Menu fzf: só pendentes+manuais (o que precisa de decisão)
   manage --all            Menu fzf: lista completa, incluindo já 100% ok
-  add <pacman|yay> <pkg>  Adiciona ao .conf e instala numa seção específica
+  add <portage> <pkg>    Adiciona ao .conf e instala numa seção específica
   remove <pkg>            Remove do .conf e desinstala
   sync                    Instala pendentes do .conf (não remove nada)
   rebuild                 Sincronização completa: instala + remove órfãos (pede confirmação antes de remover)
   rebuild --dry-run       Mostra o que seria instalado/removido, sem aplicar nada
-  upgrade                 Atualiza todos os pacotes (pacman + AUR)
-  upgrade pacman          Atualiza somente repositórios oficiais
-  upgrade yay             Atualiza somente pacotes AUR
+  upgrade                 Atualiza todos os pacotes
+  upgrade portage          Atualiza somente repositórios oficiais
   list                    Lista pacotes com versão e status
   diff                    Mostra divergências entre .conf, lock e sistema
   why <pkg>               Por que está instalado: declarado por você ou dependência de quê
@@ -1323,8 +1425,7 @@ ${BOLD}ALIASES FISH${NC}
   arns                    → arn sync
   arnr                    → arn rebuild
   arnu                    → arn upgrade
-  arnup                   → arn upgrade pacman
-  arnua                   → arn upgrade yay
+  arnup                   → arn upgrade portage
   arnl                    → arn list
   arnd                    → arn diff
   arnw                    → arn why
@@ -1332,6 +1433,7 @@ ${BOLD}ALIASES FISH${NC}
   arnm                    → arn manage
   arnma                   → arn manage --all
   arnrb                   → arn rollback
+  arnunmask               → arn unmask
 
 ${BOLD}CONF${NC}: $CONF
 ${BOLD}LOCK${NC}: $LOCK

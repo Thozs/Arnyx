@@ -18,11 +18,22 @@ backend_check_available() { command -v emerge >/dev/null 2>&1; }
 backend_unavailable_msg() { echo "Isso não é um sistema Gentoo (emerge não encontrado)."; }
 
 _install_pkg() {
-    local manager="$1" pkg="$2"
+    local manager="$1" pkg="$2" rc
     if [[ "$manager" == "pacman" ]]; then
-        portage_install "$pkg" && return 0
+        portage_install "$pkg"
+        rc=$?
+        (( rc == 0 )) && return 0
+        if (( rc == 2 )); then
+            warn "'$pkg' está mascarado no Portage — não é 'não encontrado', só falta desmascarar."
+            info "Rode: arn unmask $pkg"
+            return 1
+        fi
+        if (( rc == 3 )); then
+            warn "Build de '$pkg' interrompido (Ctrl+C) — mantido no .conf."
+            return 1
+        fi
     else
-        warn "Seção '[$manager]' não é suportada no backend Gentoo (só existe [pacman], que aqui significa Portage). Pulando '$pkg'."
+        warn "Seção '[$manager]' não é suportada no backend Gentoo. Pulando '$pkg'."
         return 1
     fi
 
@@ -135,6 +146,14 @@ UNMASK_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/arnyx/gentoo-unmasked.log"
 
 pkg_unmask() {
     local pkg="$1"
+
+    # Nome de pacote seguro (categoria/nome ou só nome) — evita que
+    # uma string maliciosa vire path no sudo cp mais abaixo.
+    if [[ ! "$pkg" =~ ^[a-zA-Z0-9][a-zA-Z0-9+_.-]*(/[a-zA-Z0-9][a-zA-Z0-9+_.-]*)?$ ]]; then
+        err "Nome de pacote inválido: '$pkg'"
+        return 1
+    fi
+
     header "Unmask — $pkg"
 
     if emerge --pretend "$pkg" &>/dev/null; then
@@ -159,17 +178,83 @@ pkg_unmask() {
     read -r -p "$(echo -e "${YELLOW}?${NC} Desmascarar '$pkg'? Isso grava em /etc/portage/package.* (só esse pacote). [s/N] ")" reply
     [[ "$reply" =~ ^[sS]$ ]] || { info "Cancelado — '$pkg' continua mascarado."; return 0; }
 
-    if sudo emerge --ask=n --autounmask=y --autounmask-write "$pkg"; then
-        ok "'$pkg' desmascarado."
+    # Snapshot dos ._cfg* já existentes, pra detectar só os que o
+    # emerge criar AGORA (e não mexer em pendências antigas do usuário
+    # que nada têm a ver com esse pacote).
+    local before_list after_list
+    before_list="$(mktemp)"; after_list="$(mktemp)"
+    find /etc/portage -type f -name '._cfg????_*' 2>/dev/null | sort > "$before_list"
+
+    local unmask_out
+    unmask_out="$(sudo emerge --ask=n --autounmask=y --autounmask-write "$pkg" 2>&1)"
+    local unmask_status=$?
+    echo "$unmask_out"
+
+    find /etc/portage -type f -name '._cfg????_*' 2>/dev/null | sort > "$after_list"
+    local cfg_files=()
+    mapfile -t cfg_files < <(comm -13 "$before_list" "$after_list")
+    rm -f "$before_list" "$after_list"
+
+    # --autounmask-write sai com status != 0 DE PROPÓSITO mesmo quando
+    # grava certo (é assim que o Portage força revisar antes de aplicar
+    # de verdade) — por isso não dá pra confiar só no exit code aqui.
+    if (( unmask_status == 0 )) || grep -q "Autounmask changes successfully written" <<< "$unmask_out"; then
+        ok "'$pkg' desmascarado (alterações pendentes pra aplicar)."
+
+        # Aplica cada ._cfg* novo, mostrando o diff e pedindo [s/N] por
+        # arquivo — só mexe no que o próprio emerge criou agora.
+        local applied_files=() skipped_files=()
+        if (( ${#cfg_files[@]} > 0 )); then
+            echo
+            info "O Portage gravou ${#cfg_files[@]} arquivo(s) pendente(s) em /etc/portage:"
+            local cfg dir base orig
+            for cfg in "${cfg_files[@]}"; do
+                dir="$(dirname "$cfg")"
+                base="$(basename "$cfg")"
+                orig="$dir/${base#._cfg????_}"
+
+                echo
+                echo -e "${BOLD}Pendente:${NC} $orig"
+                if [[ -f "$orig" ]]; then
+                    diff -u "$orig" "$cfg" 2>/dev/null \
+                        | tail -n +3 \
+                        | sed -e "s/^-/  ${RED}-${NC} /" -e "s/^+/  ${GREEN}+${NC} /"
+                else
+                    echo "  ${GREEN}(arquivo novo — não existia antes)${NC}"
+                    sed "s/^/  ${GREEN}+${NC} /" "$cfg"
+                fi
+
+                local apply_reply
+                read -r -p "$(echo -e "  ${YELLOW}?${NC} Aplicar essa alteração em $orig? [s/N] ")" apply_reply
+                if [[ "$apply_reply" =~ ^[sS]$ ]]; then
+                    sudo cp "$cfg" "$orig" && sudo rm -f "$cfg"
+                    applied_files+=("$orig")
+                    ok "  Aplicado."
+                else
+                    skipped_files+=("$orig")
+                    info "  Pulado — o arquivo $cfg continua pendente."
+                fi
+            done
+        fi
+
+        # Log: motivo + arquivos efetivamente tocados
         mkdir -p "$(dirname "$UNMASK_LOG")"
         {
-            printf '%s | %s | %s\n' \
+            printf '%s | %s | %s' \
                 "$(date '+%Y-%m-%d %H:%M:%S')" \
                 "$pkg" \
                 "$(echo "$reason" | tr '\n' ' ' | sed 's/  */ /g')"
+            if (( ${#applied_files[@]} > 0 )); then
+                printf ' | arquivos: %s' "$(printf '%s ' "${applied_files[@]}")"
+            fi
+            printf '\n'
         } >> "$UNMASK_LOG"
         info "Registrado em: $UNMASK_LOG"
-        warn "Se o emerge avisou sobre arquivos em /etc/portage pra revisar, rode: sudo etc-update (ou dispatch-conf)"
+
+        if (( ${#skipped_files[@]} > 0 )); then
+            warn "${#skipped_files[@]} arquivo(s) ficaram pendentes — rode 'sudo etc-update' (ou dispatch-conf) pra resolvê-los."
+        fi
+
         info "Depois: arn install $pkg"
     else
         err "Falha ao desmascarar '$pkg'. Nada foi registrado no log."

@@ -611,7 +611,7 @@ cmd_upgrade() {
     local target="${1:-all}"
 
     case "$target" in
-        pacman)
+        pacman|portage)
             header "Upgrade — repositório principal"
             info "Atualizando..."
             primary_upgrade
