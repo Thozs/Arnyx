@@ -222,7 +222,24 @@ from pathlib import Path
 orig_path = Path(sys.argv[1])
 cfg_path = Path(sys.argv[2])
 
-orig = orig_path.read_text().splitlines() if orig_path.exists() else []
+# Detecta se o "arquivo de config" (package.license, package.use,
+# etc.) é um arquivo ou um diretório. Portage aceita os dois layouts,
+# mas nosso modo "por pacote" só funciona se for diretório. Se for
+# arquivo, converte pra diretório (preservando conteúdo em _legacy).
+raw_orig = orig_path
+if raw_orig.parent == Path("/etc/portage"):
+    config_dir = raw_orig
+    if raw_orig.is_file():
+        legacy_content = raw_orig.read_text()
+        raw_orig.unlink()
+        raw_orig.mkdir(parents=True, exist_ok=True)
+        (raw_orig / "_legacy").write_text(legacy_content)
+    elif not raw_orig.exists():
+        raw_orig.mkdir(parents=True, exist_ok=True)
+else:
+    config_dir = raw_orig.parent
+
+orig = (config_dir / "_legacy").read_text().splitlines() if (config_dir / "_legacy").exists() else []
 cfg = cfg_path.read_text().splitlines()
 
 added = []
@@ -253,7 +270,7 @@ if not chunks:
     print("  (nenhuma linha nova — ._cfg* idêntico ao original)")
     sys.exit(0)
 
-dir_ = orig_path.parent
+dir_ = config_dir
 wrote = []
 for chunk in chunks:
     atom = next((l for l in chunk if l.strip() and not l.strip().startswith('#')), None)

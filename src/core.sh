@@ -22,6 +22,8 @@ LOCK="${XDG_CONFIG_HOME:-$HOME/.config}/arnyx/packages.lock"
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
 BLUE=$'\033[0;34m'; CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; NC=$'\033[0m'
 
+VERSION="0.6.1"
+
 info()   { echo -e "${CYAN}::${NC} $*"; }
 ok()     { echo -e "${GREEN}✓${NC} $*"; }
 warn()   { echo -e "${YELLOW}⚠${NC}  $*"; }
@@ -1091,7 +1093,7 @@ _check_aliases_nag() {
 
 usage() {
 cat << EOF
-${BOLD}arn${NC} — Arnyx, gerenciador declarativo de pacotes (Arch / Gentoo)
+${BOLD}arn${NC} — Arnyx v$VERSION, gerenciador declarativo de pacotes (Arch / Gentoo)
 
 ${BOLD}COMANDOS${NC}
   init                    Cria o arquivo packages.conf inicial
@@ -1140,7 +1142,7 @@ EOF
 }
 
 case "${1:-help}" in
-    aliases|help|-h|--help) ;;
+    aliases|help|-h|--help|version|-v|--version) ;;
     *) _check_aliases_nag ;;
 esac
 
@@ -1161,6 +1163,7 @@ case "${1:-help}" in
     unmask)  shift; cmd_unmask "$@" ;;
     rollback) shift; cmd_rollback "$@" ;;
     aliases) shift; cmd_aliases "$@" ;;
+    version|-v|--version) echo "arn $VERSION"; exit 0 ;;
     help|-h|--help) usage ;;
     *) err "Comando desconhecido: $1"; usage; exit 1 ;;
 esac
