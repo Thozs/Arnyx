@@ -142,6 +142,15 @@ pkg_reverse_deps_tool_hint() {
 # profiles/package.mask). Registra pacote+motivo+data num log separado
 # em texto simples (não mexe no /etc/portage sem já mostrar o motivo
 # e pedir confirmação antes).
+#
+# --autounmask-license=y vem DESLIGADO por padrão no Portage desde a
+# 2.1.10 justamente pra impedir que alguém aceite uma licença sem
+# perceber. Por isso, quando o motivo do mask envolve licença, ANTES
+# de tocar em qualquer --autounmask-license, mostramos o texto
+# completo da licença na tela e pedimos confirmação num prompt
+# separado ([a/N], diferente do [s/N] genérico do resto do fluxo)
+# pra cada licença encontrada. Só depois disso o restante do fluxo
+# (keyword/USE/licença, tudo junto) roda normalmente.
 UNMASK_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/arnyx/gentoo-unmasked.log"
 
 pkg_unmask() {
@@ -162,8 +171,10 @@ pkg_unmask() {
     fi
 
     info "Verificando o motivo do mask..."
+    local pretend_out
+    pretend_out="$(emerge --pretend --autounmask=y "$pkg" 2>&1)"
     local reason
-    reason="$(emerge --pretend --autounmask=y "$pkg" 2>&1 | grep -E 'masked by|keyword changes are necessary|^\[ebuild' | head -n 6)"
+    reason="$(grep -E 'masked by|keyword changes are necessary|^\[ebuild' <<< "$pretend_out" | head -n 6)"
 
     if [[ -z "$reason" ]]; then
         err "Não consegui determinar o motivo (nome errado ou erro do emerge). Rode manualmente: emerge --pretend --autounmask=y $pkg"
@@ -173,6 +184,101 @@ pkg_unmask() {
     echo -e "\n${BOLD}Motivo do mask:${NC}"
     echo "$reason" | sed 's/^/  /'
     echo
+
+    # Licença: gate separado e mais rígido que o [s/N] comum. O emerge
+    # anuncia licença pendente de duas formas DIFERENTES dependendo do
+    # estado do pacote, e as duas precisam ser tratadas:
+    #   A) pacote totalmente MASCARADO por licença — aparece dentro de
+    #      "!!! masked packages", com "masked by: X license(s)" E uma
+    #      linha "A copy of the 'X' license is located at 'PATH'."
+    #      (path exato, direto do emerge)
+    #   B) pacote só precisa de ACCEPT_LICENSE (ex: keyword já resolvido
+    #      antes, ebuild não está mais "masked" de verdade) — aparece
+    #      só como "The following license changes are necessary to
+    #      proceed", listando "ATOM NOME_LICENÇA" — SEM path nenhum.
+    #      Localizamos o arquivo nós mesmos em /var/db/repos/*/licenses/.
+    local use_autounmask_license=0
+    local has_license_issue=0
+    grep -q 'license(s)' <<< "$reason" && has_license_issue=1
+    grep -q 'following license changes are necessary to proceed' <<< "$pretend_out" && has_license_issue=1
+
+    if (( has_license_issue )); then
+        # name<TAB>path (path pode ficar vazio se não localizarmos)
+        local -A seen_lic=()
+        local licenses=()
+
+        # Formato A: nome + path exatos, direto do emerge.
+        local lic_a_lines=() lic_line n p
+        mapfile -t lic_a_lines < <(grep -oP "A copy of the '[^']+' license is located at '[^']+'\." <<< "$pretend_out" | sort -u)
+        for lic_line in "${lic_a_lines[@]}"; do
+            n="$(grep -oP "(?<=A copy of the ')[^']+" <<< "$lic_line")"
+            p="$(grep -oP "(?<=located at ')[^']+" <<< "$lic_line")"
+            [[ -n "${seen_lic[$n]:-}" ]] && continue
+            seen_lic["$n"]=1
+            licenses+=("$n"$'\t'"$p")
+        done
+
+        # Formato B: só o nome, extraído do bloco "license changes are
+        # necessary" (cada linha não-comentário é "ATOM LIC1 [LIC2...]").
+        local lic_b_names=()
+        mapfile -t lic_b_names < <(awk '
+            /following license changes are necessary to proceed/ { grab=1; next }
+            grab && /^[[:space:]]*$/ { exit }
+            grab && /^[[:space:]]*#/ { next }
+            grab && /^[[:space:]]*\(/ { next }
+            grab {
+                n = split($0, toks, /[[:space:]]+/)
+                for (i = 2; i <= n; i++) if (toks[i] != "") print toks[i]
+            }
+        ' <<< "$pretend_out" | sort -u)
+        for n in "${lic_b_names[@]}"; do
+            [[ -n "${seen_lic[$n]:-}" ]] && continue
+            seen_lic["$n"]=1
+            p="$(compgen -G "/var/db/repos/*/licenses/$n" 2>/dev/null | head -n1)"
+            licenses+=("$n"$'\t'"$p")
+        done
+
+        if (( ${#licenses[@]} == 0 )); then
+            err "'$pkg' precisa de aceite de licença, mas não consegui identificar qual no output do emerge."
+            info "Rode manualmente antes de continuar: emerge --pretend --autounmask=y $pkg"
+            return 1
+        fi
+
+        echo -e "${BOLD}${YELLOW}══════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}${YELLOW}  '$pkg' exige aceitar ${#licenses[@]} licença(s) pra instalar${NC}"
+        echo -e "${BOLD}${YELLOW}══════════════════════════════════════════════════${NC}"
+
+        local entry lic_name lic_path lic_reply
+        for entry in "${licenses[@]}"; do
+            lic_name="${entry%%$'\t'*}"
+            lic_path="${entry#*$'\t'}"
+
+            echo -e "\n${BOLD}Licença: $lic_name${NC}"
+
+            if [[ -n "$lic_path" && -r "$lic_path" ]]; then
+                echo "Arquivo: $lic_path"
+                echo -e "\n${BOLD}── Texto completo da licença '$lic_name' ──${NC}\n"
+                cat "$lic_path"
+                echo -e "\n${BOLD}── Fim da licença '$lic_name' ──${NC}\n"
+            else
+                warn "Não localizei o arquivo da licença '$lic_name' em /var/db/repos/*/licenses/ pra mostrar o texto aqui."
+                info "Procure manualmente antes de continuar, ex.: find /var/db/repos -name '$lic_name'"
+                echo
+            fi
+
+            read -r -p "$(echo -e "${YELLOW}?${NC} Você leu e ACEITA os termos da licença '$lic_name'? [a/N] ")" lic_reply
+            if [[ "$lic_reply" =~ ^[aA]$ ]]; then
+                ok "Licença '$lic_name' aceita."
+            else
+                warn "Licença '$lic_name' NÃO aceita."
+                info "'$pkg' continua mascarado — nada foi alterado em /etc/portage."
+                return 0
+            fi
+        done
+
+        use_autounmask_license=1
+        echo
+    fi
 
     local reply
     read -r -p "$(echo -e "${YELLOW}?${NC} Desmascarar '$pkg'? Isso grava em /etc/portage/package.* (só esse pacote). [s/N] ")" reply
@@ -185,8 +291,11 @@ pkg_unmask() {
     before_list="$(mktemp)"; after_list="$(mktemp)"
     find /etc/portage -type f -name '._cfg????_*' 2>/dev/null | sort > "$before_list"
 
+    local -a autounmask_flags=(--autounmask=y --autounmask-write)
+    (( use_autounmask_license )) && autounmask_flags+=(--autounmask-license=y)
+
     local unmask_out
-    unmask_out="$(sudo emerge --ask=n --autounmask=y --autounmask-write "$pkg" 2>&1)"
+    unmask_out="$(sudo emerge --ask=n "${autounmask_flags[@]}" "$pkg" 2>&1)"
     local unmask_status=$?
     echo "$unmask_out"
 
@@ -325,6 +434,9 @@ PYEXTRACT
                 "$(echo "$reason" | tr '\n' ' ' | sed 's/  */ /g')"
             if (( ${#applied_files[@]} > 0 )); then
                 printf ' | arquivos: %s' "$(printf '%s ' "${applied_files[@]}")"
+            fi
+            if (( use_autounmask_license )); then
+                printf ' | licença(s) aceita(s) explicitamente pelo usuário'
             fi
             printf '\n'
         } >> "$UNMASK_LOG"

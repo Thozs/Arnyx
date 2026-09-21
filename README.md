@@ -218,22 +218,44 @@ sem exigir que você saiba qual é o caso.
 O fluxo é:
 
 1. Mostra o motivo do mask
-2. Pede confirmação `[s/N]`
-3. Roda `emerge --autounmask-write` — o Portage decide **o que**
+2. **Se o motivo envolver licença**, entra num gate à parte, mais
+   rígido que o `[s/N]` comum (ver abaixo) — aceitar uma licença é
+   uma decisão consciente, não algo que dá pra confirmar sem querer
+3. Pede confirmação geral `[s/N]`
+4. Roda `emerge --autounmask-write` — o Portage decide **o que**
    precisa ser escrito (keyword, licença, USE flag, etc.)
-4. Detecta os arquivos de proposta (`._cfg*`) que o Portage acabou
+5. Detecta os arquivos de proposta (`._cfg*`) que o Portage acabou
    de criar em `/etc/portage/`
-5. Extrai só as linhas novas e grava cada uma em
+6. Extrai só as linhas novas e grava cada uma em
    `/etc/portage/package.<tipo>/<nome-do-pacote>` — assim cada
    pacote tem o próprio arquivo, em vez de tudo virar um só
-6. Descarta o arquivo temporário do Portage — o conteúdo útil já
+7. Descarta o arquivo temporário do Portage — o conteúdo útil já
    foi extraído no passo anterior, então ele vira só lixo acumulando
 
 **Nada é escrito em `/etc/portage` sem sua confirmação.** Se você
-responder `N` no passo 5, a proposta do Portage fica pendente como
+responder `N` no passo 6, a proposta do Portage fica pendente como
 `._cfg*` — o Arnyx avisa no fim de `sync`/`rebuild`/`install`/`upgrade`
 se existirem pendentes, e o comando pra resolvê-las é
 `sudo etc-update` (ou `sudo dispatch-conf`).
+
+#### Gate de licença
+
+O Portage desliga `--autounmask-license` por padrão (desde a 2.1.10)
+de propósito, pra ninguém aceitar uma licença sem perceber. O Arnyx
+respeita essa cautela e só passa `--autounmask-license=y` pro emerge
+depois que você aceitar **explicitamente, licença por licença**:
+
+- Pra cada licença que o pacote exige, o Arnyx mostra o nome, o
+  caminho do arquivo e **o texto completo da licença** direto no
+  terminal (`cat` do arquivo em `/var/db/repos/*/licenses/`)
+- A confirmação é um prompt separado, `[a/N]` (a = aceito) —
+  diferente do `[s/N]` genérico usado no resto do Arnyx, pra não dar
+  pra confirmar no automático sem perceber que é uma licença.
+  Qualquer resposta que não seja `a`/`A` (incluindo `n`, vazio, etc.)
+  cancela o unmask daquele pacote e nada é escrito em `/etc/portage`
+- Se alguma licença for aceita, o log em
+  `~/.local/state/arnyx/gentoo-unmasked.log` registra isso junto com
+  motivo/data/arquivos tocados
 
 Tudo fica registrado em `~/.local/state/arnyx/gentoo-unmasked.log` —
 pacote, motivo, arquivos efetivamente tocados e data.
