@@ -669,10 +669,16 @@ _add_to_conf() {
     tmp="$(mktemp)"
     awk -v sec="$manager" -v pkg="$pkg" -v cmt="$comment" '
         function emit() { if (cmt != "") print "# " cmt; print pkg }
-        $0 == "["sec"]" { print; in_sec=1; next }
+        $0 == "["sec"]" { print; in_sec=1; found=1; next }
         in_sec && /^\[/ { emit(); in_sec=0 }
         { print }
-        END { if (in_sec) emit() }
+        END {
+            if (in_sec) emit()
+            # Seção nunca existiu no arquivo (ex: .conf criado antes do
+            # backend atual, ou com nome de seção diferente) — sem isso
+            # o pacote simplesmente sumia em silêncio, sem erro nenhum.
+            else if (!found) { print "[" sec "]"; emit() }
+        }
     ' "$CONF" > "$tmp" && mv "$tmp" "$CONF"
 }
 
