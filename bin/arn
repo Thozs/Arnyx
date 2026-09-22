@@ -361,7 +361,12 @@ for line in difflib.unified_diff(orig, cfg, n=0, lineterm=''):
 
 def extract_pkg(atom_line):
     token = atom_line.strip().split()[0] if atom_line.strip() else ''
-    m = re.match(r'^[=<>~]?\s*[a-zA-Z0-9+_.-]+/([a-zA-Z0-9+_.-]+?)(?:-[0-9].*)?$', token)
+    # Prefixos de versão do Portage podem ter 1 OU 2 caracteres
+    # (=, >, <, ~, mas também >=, <=, ==) — faltava cobrir os de 2
+    # chars, então qualquer atom tipo ">=cat/pkg-1.2.3" (o formato
+    # mais comum que o autounmask gera pra licença/USE versionado)
+    # falhava aqui e o chunk inteiro era descartado em silêncio.
+    m = re.match(r'^(?:>=|<=|==|[=<>~])?\s*[a-zA-Z0-9+_.-]+/([a-zA-Z0-9+_.-]+?)(?:-[0-9].*)?\*?$', token)
     return m.group(1) if m else None
 
 chunks, current = [], []
