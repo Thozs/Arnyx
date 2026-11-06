@@ -126,7 +126,11 @@ get_section() {
 _remove_from_conf() {
     local pkg="$1" tmp
     tmp="$(mktemp)"
-    grep -Fxv "$pkg" "$CONF" > "$tmp" && mv "$tmp" "$CONF"
+    # grep retorna 1 quando nenhuma linha bate (i.e. o .conf era só
+    # esse pacote) — sem o "|| true", o "&& mv" seria cortado e a
+    # remoção não aconteceria. -- protege contra pkg começando com '-'.
+    grep -Fxv -- "$pkg" "$CONF" > "$tmp" || true
+    mv "$tmp" "$CONF"
 }
 
 # Insere a linha no fim da seção indicada, criando a seção se faltar.
