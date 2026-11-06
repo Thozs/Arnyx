@@ -376,7 +376,7 @@ cmd_search() {
     local chosen
     chosen=$(printf '%s\n' "${lines[@]}" | sort -k3 | fzf \
         --multi \
-        --bind 'space:toggle' \
+        --bind 'space:toggle+up,tab:toggle+down' \
         --header 'TAB/espaço: marca vários  •  Enter: instala via arn install  •  ESC: cancela')
 
     [[ -z "$chosen" ]] && { info "Cancelado."; return; }
@@ -458,7 +458,7 @@ cmd_manage() {
     raw=$(printf '%s\n' "${lines[@]}" | sort -k3 | fzf \
         --multi \
         --header 'TAB/espaço/enter: marca vários  •  D: remove do .conf  •  A: adota no .conf  •  ESC: cancela' \
-        --bind 'space:toggle' \
+        --bind 'space:toggle+up,tab:toggle+down' \
         --expect='D,A')
 
     [[ -z "$raw" ]] && { info "Cancelado."; return; }
