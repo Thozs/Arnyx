@@ -45,7 +45,7 @@ Sistemas Arch e Gentoo não têm um jeito nativo de dizer *"esse é o conjunto e
 
 | Comando | O que faz |
 |---|---|
-| `arn install <pkg>` | Detecta sozinho a fonte (repo oficial / AUR / Portage), adiciona ao `.conf` e instala |
+| `arn install <pkg>` | Detecta a fonte, adiciona ao `.conf` e instala. Se já estiver no `.conf` mas desatualizado, pergunta antes de atualizar. |
 | `arn search <termo>` | Busca no repo oficial + AUR (Arch) / GURU (Gentoo), menu fzf pra instalar direto |
 | `arn manage` | Menu interativo (fzf) mostrando só o que precisa de decisão — pendente ou instalado manualmente |
 | `arn sync` | Instala o que falta do `.conf` (não remove nada) |
@@ -63,7 +63,7 @@ Por baixo:
 - **Parsing do `.conf` em `awk`/`grep` puro** — sem dependência de linguagem pesada no dia a dia
 - **Cache do banco local** — evita revarredura cara em HDD a cada comando (pacman no Arch, qlist no Gentoo)
 - **Instalação em lote** — uma transação só em vez de uma por pacote
-- **Auto-limpeza** — se um pacote falha ao instalar, some do `.conf` sozinho, sem sujeira
+- **Auto-limpeza** — se um pacote novo falha ao instalar, some do `.conf` sozinho. Se for uma atualização de algo que já estava no `.conf`, ele mantém e avisa.
 
 ---
 
@@ -92,7 +92,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Thozs/Arnyx/main/bootstrap.s
      https://github.com/SEU_USUARIO/seu-repo-de-config.git
 ```
 
-O `bootstrap.sh` instala `git`/`base-devel`, compila o `yay` do zero e instala o `arn`.
+O `bootstrap.sh` instala `git`, configura o `yay-bin` (rápido) e instala o `arn`. Você pode escolher outro AUR helper (ou nenhum) no menu interativo ou usando a flag `--aur-helper=paru-bin`.
 
 **Gentoo:**
 
