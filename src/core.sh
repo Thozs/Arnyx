@@ -663,24 +663,34 @@ cmd_rebuild() {
 
 cmd_upgrade() {
     local target="${1:-all}"
+    local rc_primary=0 rc_secondary=0
+    local did_primary=0 did_secondary=0
 
     case "$target" in
         pacman|portage)
             header "Upgrade — repositório principal"
             info "Atualizando..."
             primary_upgrade
+            rc_primary=$?
+            did_primary=1
             ;;
         yay|aur)
             header "Upgrade — fonte secundária (AUR/overlay)"
             info "Atualizando fonte secundária..."
             secondary_upgrade
+            rc_secondary=$?
+            did_secondary=1
             ;;
         all)
             header "Upgrade — atualizando todos os pacotes"
             info "Atualizando repositório principal..."
             primary_upgrade
+            rc_primary=$?
+            did_primary=1
             info "Atualizando fonte secundária..."
             secondary_upgrade
+            rc_secondary=$?
+            did_secondary=1
             ;;
         *)
             die "Uso: upgrade [pacman|yay]"
@@ -688,6 +698,16 @@ cmd_upgrade() {
     esac
 
     _write_lock_from_conf
+
+    if (( rc_primary != 0 || rc_secondary != 0 )); then
+        (( did_primary && rc_primary != 0 )) && \
+            err "Upgrade do repositório principal falhou (rc=$rc_primary)."
+        (( did_secondary && rc_secondary != 0 )) && \
+            err "Upgrade da fonte secundária falhou (rc=$rc_secondary)."
+        _check_pending_cfg
+        return 1
+    fi
+
     ok "Upgrade concluído!"
     _check_pending_cfg
 }
