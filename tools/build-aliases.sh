@@ -39,9 +39,8 @@ fi
 
 mkdir -p "$OUT_DIR/fish" "$OUT_DIR/sh"
 
-HEADER="# Gerado automaticamente por tools/build-aliases.sh a partir de bin/arn
-# Não edite este arquivo diretamente — edite a seção 'ALIASES FISH' em
-# bin/arn (dentro da função usage()) e rode o script de novo."
+HEADER="# Gerado automaticamente — não edite este arquivo diretamente.
+# Fonte: seção ALIASES FISH em src/core.sh (via bin/arn)"
 
 echo "$HEADER" > "$FISH_OUT"
 echo "$HEADER" > "$SH_OUT"

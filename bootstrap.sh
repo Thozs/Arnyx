@@ -46,7 +46,7 @@ read -rp "Continuar? [s/N] " confirm
 [[ "$confirm" =~ ^[sS]$ ]] || { info "Cancelado."; exit 0; }
 
 header "1/4 — Dependências base"
-if ! command -v git >/dev/null 2>&1 || ! pacman -Qg base-devel &>/dev/null; then
+if ! command -v git >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
     info "Instalando git e base-devel..."
     sudo pacman -S --needed --noconfirm git base-devel
 else

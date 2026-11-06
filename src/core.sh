@@ -45,7 +45,9 @@ need_conf() {
 # gravou e ainda não foram aplicadas — o usuário decide quando/quais
 # revisar (etc-update ou dispatch-conf).
 _check_pending_cfg() {
+    (( ${_CFG_CHECKED:-0} )) && return 0
     [[ -d /etc/portage ]] || return 0
+    _CFG_CHECKED=1
     local n
     n="$(find /etc/portage -type f -name '._cfg*' 2>/dev/null | wc -l)"
     (( n > 0 )) || return 0
@@ -190,6 +192,7 @@ EOF
 
 cmd_add() {
     local manager="${1:-}"; shift || true
+    local pkg
     [[ "$manager" == "pacman" || "$manager" == "yay" ]] \
         || die "Uso: add <pacman|yay> <pacote> [pacote2 ...]"
     (( $# )) || die "Informe ao menos um pacote."
@@ -209,6 +212,7 @@ cmd_add() {
     done
 
     _write_lock_from_conf
+    _check_pending_cfg
 }
 
 _resolve_pkg_name() {
@@ -365,6 +369,7 @@ cmd_search() {
     local chosen
     chosen=$(printf '%s\n' "${lines[@]}" | sort -k3 | fzf \
         --multi \
+        --bind 'space:toggle' \
         --header 'TAB/espaço: marca vários  •  Enter: instala via arn install  •  ESC: cancela')
 
     [[ -z "$chosen" ]] && { info "Cancelado."; return; }
@@ -446,7 +451,7 @@ cmd_manage() {
     raw=$(printf '%s\n' "${lines[@]}" | sort -k3 | fzf \
         --multi \
         --header 'TAB/espaço/enter: marca vários  •  D: remove do .conf  •  A: adota no .conf  •  ESC: cancela' \
-        --bind 'space:toggle,enter:toggle' \
+        --bind 'space:toggle' \
         --expect='D,A')
 
     [[ -z "$raw" ]] && { info "Cancelado."; return; }
@@ -496,6 +501,7 @@ cmd_remove() {
     (( $# )) || die "Uso: remove <pacote> [pacote2 ...]"
     need_conf
 
+    local pkg
     for pkg in "$@"; do
         local found_in=""
         get_section "pacman" | grep -qx "$pkg" && found_in="pacman"
@@ -842,7 +848,9 @@ cmd_unmask() {
 
 cmd_edit() {
     need_conf
-    "${EDITOR:-nano}" "$CONF"
+    local -a editor
+    read -ra editor <<< "${EDITOR:-nano}"
+    "${editor[@]}" "$CONF"
     info "Rode 'sync' para instalar novos ou 'rebuild' para sincronização completa."
 }
 
@@ -1029,8 +1037,8 @@ _aliases_already_present() {
 
 _aliases_render() {
     local pairs="$1" name cmd
-    echo "# Gerado por 'arn aliases install' — não edite direto."
-    echo "# Fonte: seção ALIASES FISH em bin/arn"
+    echo "# Gerado automaticamente — não edite este arquivo diretamente."
+    echo "# Fonte: seção ALIASES FISH em src/core.sh (via bin/arn)"
     while IFS=: read -r name cmd; do
         [[ -z "$name" ]] && continue
         echo "alias $name '$cmd'"
@@ -1112,6 +1120,7 @@ cmd_aliases() {
 # Aviso único (por dia, até ser dispensado ou instalado) sugerindo a
 # instalação dos aliases, se ainda não existir e o shell for fish.
 _check_aliases_nag() {
+    [[ -t 0 ]] || return 0   # sem tty — não pergunta
     [[ -f "$CACHE_DIR/.alias_nag_dismissed" ]] && return 0
 
     local shell_name; shell_name="$(_detect_shell)"

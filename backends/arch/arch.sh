@@ -118,6 +118,6 @@ _install_batch() {
     warn "Instalação em lote falhou, tentando pacote a pacote pra achar o culpado..."
     local pkg
     for pkg in "${pkgs[@]}"; do
-        pacman -Q "$pkg" &>/dev/null || _install_pkg "$manager" "$pkg" || true
+        _is_installed "$pkg" || _install_pkg "$manager" "$pkg" || true
     done
 }

@@ -85,6 +85,7 @@ if [[ "$BACKEND" == "gentoo" ]]; then
     sed -i \
         -e '/Seção \[yay\]/d' \
         -e '/^\[yay\]$/d' \
+        -e '/echo "\[yay\]"/d' \
         -e 's/"\$manager" == "portage" || "\$manager" == "yay"/"$manager" == "portage"/' \
         -e 's/Uso: add <portage|yay>/Uso: add <portage>/' \
         -e 's#não encontrado nem no repo oficial nem no AUR\.#não encontrado no repo oficial.#' \

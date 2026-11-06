@@ -125,7 +125,11 @@ pkg_remove_force() { sudo emerge --ask=n --quiet --depclean "$1"; }
 
 pkg_install_reason() {
     local pkg="$1"
-    if grep -qE "(^|/)${pkg}(:|$)" /var/lib/portage/world 2>/dev/null; then
+    if awk -v p="$pkg" '
+        { n=split($0,a,"/"); last=a[n]
+          if ($0==p || last==p) { found=1; exit } }
+        END { exit !found }
+    ' /var/lib/portage/world 2>/dev/null; then
         echo "Explicitly installed"
     else
         echo "Installed as a dependency"
