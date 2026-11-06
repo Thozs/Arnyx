@@ -23,7 +23,7 @@ LOCK="${XDG_CONFIG_HOME:-$HOME/.config}/arnyx/packages.lock"
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
 BLUE=$'\033[0;34m'; CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; NC=$'\033[0m'
 
-VERSION="0.6.1"
+VERSION="0.7.0"
 
 info()   { echo -e "${CYAN}::${NC} $*"; }
 ok()     { echo -e "${GREEN}✓${NC} $*"; }
