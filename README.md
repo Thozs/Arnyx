@@ -182,10 +182,12 @@ Nota sobre `bin/arn`: esse arquivo é **gerado** (igual os aliases acima) a part
 `src/core.sh` (núcleo, editado à mão) + `backends/<distro>/` (lógica específica por
 gerenciador — `arch/` com `pacman`/`aur`, `gentoo/` com `portage`), via
 `tools/build-arn.sh` (que auto-detecta o backend por `/etc/os-release`, ou aceita
-`--backend=arch|gentoo` explícito). Continua sendo commitado no git — quem só
-instala via `bootstrap.sh`/`bootstrap-gentoo.sh` não precisa se preocupar com isso.
-Só importa pra quem for mexer no código: edite `src/core.sh`/`backends/`, nunca
-`bin/arn` direto.
+`--backend=arch|gentoo` explícito). **Não é commitado** — é gerado no momento da
+instalação (os dois bootstraps rodam `build-arn.sh` antes de instalar) e está no
+`.gitignore`. Quem só instala via `bootstrap.sh`/`bootstrap-gentoo.sh` não precisa
+se preocupar; quem clona pra mexer no código roda `./tools/build-arn.sh` uma vez
+antes de usar `./bin/arn`. Edite sempre `src/core.sh`/`backends/`, nunca `bin/arn`
+direto.
 
 Pra ativar, uma vez por clone:
 
@@ -194,9 +196,10 @@ git config core.hooksPath .githooks
 chmod +x .githooks/pre-commit tools/build-arn.sh tools/build-aliases.sh
 ```
 
-Depois disso, editar um alias é só mexer na seção `ALIASES FISH` do `bin/arn` e
-commitar normalmente — `tools/build-aliases.sh` roda automático e inclui os arquivos
-atualizados no mesmo commit.
+Depois disso, editar um alias é só mexer na seção `ALIASES FISH` de `src/core.sh`
+(dentro da função `usage()`) e commitar normalmente — o hook roda
+`tools/build-aliases.sh` automático e inclui os arquivos `aliases/` atualizados no
+mesmo commit.
 
 </details>
 ---

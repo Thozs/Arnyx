@@ -1,3 +1,6 @@
 # Configuração pessoal — cada máquina tem a sua, não versiona aqui
 *.conf.local
 *.bak
+
+# Artefato gerado por tools/build-arn.sh — não versionar
+bin/arn

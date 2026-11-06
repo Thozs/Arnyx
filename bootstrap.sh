@@ -56,6 +56,7 @@ fi
 header "2/4 — Instalando o Arnyx"
 tmp_arnyx="$(mktemp -d)"
 git clone --depth 1 "$ARNYX_REPO" "$tmp_arnyx"
+(cd "$tmp_arnyx" && ./tools/build-arn.sh --backend=arch)
 sudo install -Dm755 "$tmp_arnyx/bin/arn" /usr/local/bin/arn
 rm -rf "$tmp_arnyx"
 ok "arn instalado em /usr/local/bin/arn"

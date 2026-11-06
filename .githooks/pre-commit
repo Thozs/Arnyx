@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # .githooks/pre-commit — se src/core.sh ou backends/**/*.sh mudou neste
-# commit, regenera bin/arn (via tools/build-arn.sh) e, na sequência,
-# aliases/ (via tools/build-aliases.sh, já que a seção ALIASES FISH lida
-# de dentro do bin/arn recém-gerado pode ter mudado) — tudo incluído no
-# mesmo commit.
+# commit, valida que o build funciona (build-arn.sh) e regenera aliases/
+# (via build-aliases.sh, já que a seção ALIASES FISH lida de dentro do
+# bin/arn recém-gerado pode ter mudado) — aliases/ continua versionado.
+#
+# bin/arn NÃO é commitado (está no .gitignore) — é gerado no momento da
+# instalação (bootstrap.sh / bootstrap-gentoo.sh rodam build-arn.sh antes
+# de instalar). Este hook só verifica que o build não quebrou.
 #
 # Setup (uma vez só, por clone):
 #   git config core.hooksPath .githooks
@@ -17,7 +20,7 @@ if ! git diff --cached --name-only | grep -qE '^(src/core\.sh|backends/.*\.sh)$'
     exit 0
 fi
 
-echo ":: src/core.sh ou backends/ mudou — regenerando bin/arn..."
+echo ":: src/core.sh ou backends/ mudou — validando build-arn.sh..."
 
 if ! ./tools/build-arn.sh; then
     echo "✗ build-arn.sh falhou — commit abortado." >&2
@@ -31,5 +34,5 @@ if ! ./tools/build-aliases.sh; then
     exit 1
 fi
 
-git add bin/arn aliases/
-echo "✓ bin/arn e aliases/ atualizados e incluídos neste commit."
+git add aliases/
+echo "✓ build ok, aliases/ atualizados e incluídos neste commit (bin/arn não é commitado)."

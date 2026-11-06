@@ -4,9 +4,10 @@
 #
 #  Este arquivo NÃO é o binário final. tools/build-arn.sh concatena
 #  backends/arch/arch.sh + backends/arch/sources/{pacman,aur}.sh +
-#  este arquivo, nessa ordem, e gera bin/arn (commitado, é o que o
-#  bootstrap.sh de fato instala). Editar aqui, rodar
-#  ./tools/build-arn.sh, testar via ./bin/arn.
+#  este arquivo, nessa ordem, e gera bin/arn. bin/arn NÃO é commitado
+#  (está no .gitignore) — os bootstraps rodam build-arn.sh antes de
+#  instalar. Editar aqui, rodar ./tools/build-arn.sh, testar via
+#  ./bin/arn.
 #
 #  arn — Arnyx: gerenciador declarativo de pacotes para CachyOS
 #  Inspirado no estilo NixOS: declare, sync, pronto.
