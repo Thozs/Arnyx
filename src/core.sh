@@ -299,8 +299,15 @@ _try_upgrade_pkg() {
     fi
 
     if pkg_outdated "$manager" "$pkg"; then
-        info "'$pkg' está desatualizado — atualizando..."
-        _install_pkg "$manager" "$pkg" 1 || true
+        warn "'$pkg' está desatualizado."
+        local reply
+        read -r -p "$(echo -e "${YELLOW}?${NC} Atualizar agora? [s/N] ")" reply
+        if [[ "$reply" =~ ^[sS]$ ]]; then
+            info "Atualizando '$pkg'..."
+            _install_pkg "$manager" "$pkg" 1 || true
+        else
+            info "Mantido como está — nada foi alterado."
+        fi
     else
         ok "'$pkg' já está no .conf e atualizado."
     fi
