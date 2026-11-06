@@ -18,7 +18,7 @@ backend_check_available() { command -v emerge >/dev/null 2>&1; }
 backend_unavailable_msg() { echo "Isso não é um sistema Gentoo (emerge não encontrado)."; }
 
 _install_pkg() {
-    local manager="$1" pkg="$2" rc
+    local manager="$1" pkg="$2" keep_on_fail="${3:-0}" rc
     if [[ "$manager" == "pacman" ]]; then
         portage_install "$pkg"
         rc=$?
@@ -34,6 +34,11 @@ _install_pkg() {
         fi
     else
         warn "Seção '[$manager]' não é suportada no backend Gentoo. Pulando '$pkg'."
+        return 1
+    fi
+
+    if (( keep_on_fail )); then
+        warn "Falha ao instalar/atualizar '$pkg' (mantido no .conf)."
         return 1
     fi
 
@@ -152,6 +157,16 @@ pkg_reverse_deps_tool_hint() {
 # pra cada licença encontrada. Só depois disso o restante do fluxo
 # (keyword/USE/licença, tudo junto) roda normalmente.
 UNMASK_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/arnyx/gentoo-unmasked.log"
+
+# Retorna 0 se pkg tem versão mais nova disponível, 1 se está atualizado
+# (ou se não foi possível checar). $1 = manager ("pacman" no source, "portage" no build).
+pkg_outdated() {
+    local manager="$1" pkg="$2"
+    [[ "$manager" == "pacman" ]] || return 1
+    local out
+    out="$(emerge --pretend --update "$pkg" 2>/dev/null)"
+    grep -q '^\[ebuild' <<< "$out"
+}
 
 pkg_unmask() {
     local pkg="$1"

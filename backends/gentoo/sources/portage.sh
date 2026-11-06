@@ -45,7 +45,10 @@ portage_install() {
     # tee pra tela E pra arquivo: output streaming ao vivo (compilação
     # visível conforme acontece), e ainda dá pra grepar "have been
     # masked" no fim sem depender só do exit code.
-    sudo emerge --ask=n "$pkg" 2>&1 | tee "$log"
+    # --update --newuse: idempotente — se já está atualizado, emerge
+    # responde "0 packages" e não faz nada; se tem versão nova ou USE
+    # flags mudaram, atualiza. Equivalente ao --needed do pacman.
+    sudo emerge --ask=n --update --newuse "$pkg" 2>&1 | tee "$log"
     local status="${PIPESTATUS[0]}"
 
     local masked=0
@@ -62,7 +65,7 @@ portage_install() {
 portage_install_batch() {
     local pkgs=("$@")
     (( ${#pkgs[@]} )) || return 0
-    sudo emerge --ask=n "${pkgs[@]}"
+    sudo emerge --ask=n --update --newuse "${pkgs[@]}"
 }
 
 portage_upgrade() {

@@ -72,12 +72,30 @@ pkg_unmask() {
     die "'arn unmask' não se aplica ao Arch — pacman não tem o conceito de mask/unmask do Portage."
 }
 
-_install_pkg() {
+# Retorna 0 se pkg tem versão mais nova disponível, 1 se está atualizado
+# (ou se não foi possível checar). $1 = manager (pacman|yay/AUR).
+pkg_outdated() {
     local manager="$1" pkg="$2"
+    if [[ "$manager" == "pacman" ]]; then
+        [[ -n "$(LC_ALL=C pacman -Qu "$pkg" 2>/dev/null)" ]]
+    else
+        local helper; helper="$(aur_detect_helper)"
+        [[ -n "$helper" ]] && command -v "$helper" >/dev/null 2>&1 && \
+            [[ -n "$(LC_ALL=C "$helper" -Qu "$pkg" 2>/dev/null)" ]]
+    fi
+}
+
+_install_pkg() {
+    local manager="$1" pkg="$2" keep_on_fail="${3:-0}"
     if [[ "$manager" == "pacman" ]]; then
         pacman_install "$pkg" && return 0
     else
         aur_install "$pkg" && return 0
+    fi
+
+    if (( keep_on_fail )); then
+        warn "Falha ao instalar/atualizar '$pkg' (mantido no .conf)."
+        return 1
     fi
 
     warn "Instalação de '$pkg' falhou. Removendo do .conf..."

@@ -277,15 +277,41 @@ _adopt_pkg() {
     fi
 }
 
+# Chamado pelo cmd_install quando o pacote JÁ está no .conf. Trata
+# 3 situações: não instalado, instalado+desatualizado, instalado+ok.
+# Em qualquer falha, NUNCA remove do .conf (keep_on_fail=1) — o
+# usuário não pediu pra remover.
+_try_upgrade_pkg() {
+    local manager="$1" pkg="$2"
+
+    if ! pkg_installed_now "$pkg"; then
+        info "'$pkg' está no .conf mas não está instalado — instalando..."
+        _install_pkg "$manager" "$pkg" 1 || true
+        return
+    fi
+
+    if pkg_outdated "$manager" "$pkg"; then
+        info "'$pkg' está desatualizado — atualizando..."
+        _install_pkg "$manager" "$pkg" 1 || true
+    else
+        ok "'$pkg' já está no .conf e atualizado."
+    fi
+}
+
 # Não precisa saber se o pacote é do repo oficial ou do AUR —
 # o comando checa nos dois e adiciona no lugar certo sozinho.
 cmd_install() {
     (( $# )) || die "Uso: install <pacote> [pacote2 ...]"
     need_conf
 
+    local pkg
     for pkg in "$@"; do
-        if get_section "pacman" | grep -qx "$pkg" || get_section "yay" | grep -qx "$pkg"; then
-            warn "'$pkg' já está no .conf"
+        if get_section "pacman" | grep -qx "$pkg"; then
+            _try_upgrade_pkg "pacman" "$pkg"
+            continue
+        fi
+        if get_section "yay" | grep -qx "$pkg"; then
+            _try_upgrade_pkg "yay" "$pkg"
             continue
         fi
 
